@@ -1,0 +1,14 @@
+[package]
+name = "minirocks"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.85"
+description = "A small, durable LSM-tree key-value store written from scratch"
+publish = false
+
+[dependencies]
+# CRC32 for per-record checksums in the WAL (and later SSTable blocks).
+# Justification: hardware-accelerated (SSE4.2/PCLMULQDQ, ARMv8 CRC) and tiny;
+# its only transitive dependency is `cfg-if`. A hand-rolled table CRC would
+# work, but checksumming sits on the hot write path, so speed matters.
+crc32fast = "1.4"
