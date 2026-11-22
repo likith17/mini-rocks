@@ -1,9 +1,9 @@
 //! MiniRocks: a small, durable key-value store built on a log-structured
 //! merge tree.
 //!
-//! Phase 1 contains the write-ahead log, the in-memory memtable, and crash
-//! recovery. SSTables, flushing, compaction and the manifest come in later
-//! phases.
+//! Done so far: the write-ahead log, the memtable, crash recovery (phase 1),
+//! and the SSTable format with background flushing (phase 2). Bloom-filtered
+//! reads, the manifest and compaction come in later phases.
 //!
 //! # Durability contract
 //!
@@ -18,14 +18,25 @@
 //!
 //! Every policy hands each record to the OS with one `write` call before
 //! returning, and nothing is buffered in user space, so killing the process
-//! never loses an acknowledged write. See `DECISIONS.md` for the details.
+//! never loses an acknowledged write. A WAL is deleted only after the
+//! SSTable holding its data has been fsynced and renamed into place. See
+//! `DECISIONS.md` for the details.
 
+mod block;
+mod bloom;
+mod coding;
 mod db;
 mod error;
+pub mod filename;
 mod fsutil;
+mod hash;
 pub mod memtable;
 mod options;
+pub mod sstable;
 pub mod wal;
+
+#[cfg(test)]
+mod testutil;
 
 pub use db::{Db, RecoveryReport, MAX_KEY_LEN, MAX_VALUE_LEN};
 pub use error::{Error, Result};

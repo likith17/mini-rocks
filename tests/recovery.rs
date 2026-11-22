@@ -17,7 +17,7 @@ use minirocks::{Db, Error, Options, SyncPolicy, WalRecoveryMode};
 type Model = BTreeMap<Vec<u8>, Vec<u8>>;
 
 fn opts(sync: SyncPolicy, wal_recovery: WalRecoveryMode) -> Options {
-    Options { sync, wal_recovery }
+    Options { sync, wal_recovery, ..Options::default() }
 }
 
 fn wal_path(dir: &Path) -> std::path::PathBuf {
@@ -452,7 +452,11 @@ fn damaged_older_wal_is_corruption() {
 #[ignore]
 fn crash_child_writer() {
     let Ok(dir) = std::env::var("MINIROCKS_CHILD_DIR") else { return };
-    let db = Db::open(&dir, Options::default()).unwrap();
+    let mut options = Options::default();
+    if let Ok(size) = std::env::var("MINIROCKS_CHILD_MEMTABLE") {
+        options.memtable_size = size.parse().unwrap();
+    }
+    let db = Db::open(&dir, options).unwrap();
     let start: u64 = std::env::var("MINIROCKS_CHILD_START").unwrap().parse().unwrap();
     let mut out = std::io::stdout().lock();
     for i in start.. {
@@ -467,14 +471,29 @@ fn crash_child_writer() {
 /// test only; the full crash harness is phase 6.
 #[test]
 fn kill_during_writes() {
-    let dir = TempDir::new("kill");
+    kill_cycles("kill", None, 5, 7);
+}
+
+/// Same, with a 2 KiB memtable so kills regularly land during a WAL rotation
+/// or background flush.
+#[test]
+fn kill_during_writes_with_frequent_flushes() {
+    kill_cycles("kill-flush", Some(2048), 10, 8);
+}
+
+fn kill_cycles(tag: &str, memtable_size: Option<usize>, cycles: usize, seed: u64) {
+    let dir = TempDir::new(tag);
     let exe = std::env::current_exe().unwrap();
-    let mut rng = Rng::new(7);
+    let mut rng = Rng::new(seed);
     let mut next = 0u64; // first key the next child writes
     let mut acked_total = 0u64;
-    for cycle in 0..5 {
+    for cycle in 0..cycles {
         let kill_after = 20 + rng.below(300);
-        let mut child = Command::new(&exe)
+        let mut cmd = Command::new(&exe);
+        if let Some(size) = memtable_size {
+            cmd.env("MINIROCKS_CHILD_MEMTABLE", size.to_string());
+        }
+        let mut child = cmd
             .args(["crash_child_writer", "--exact", "--ignored", "--nocapture", "--test-threads=1"])
             .env("MINIROCKS_CHILD_DIR", dir.path())
             .env("MINIROCKS_CHILD_START", next.to_string())
@@ -517,5 +536,9 @@ fn kill_during_writes() {
         acked_total += last_ack + 1 - next;
         next = all.len() as u64;
     }
-    eprintln!("kill_during_writes: 5 kills, {acked_total} acknowledged writes verified");
+    let ssts = fs::read_dir(dir.path())
+        .unwrap()
+        .filter(|e| e.as_ref().unwrap().path().extension().is_some_and(|x| x == "sst"))
+        .count();
+    eprintln!("{tag}: {cycles} kills, {acked_total} acknowledged writes verified, {ssts} SSTables at end");
 }

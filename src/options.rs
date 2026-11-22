@@ -38,6 +38,13 @@ pub enum WalRecoveryMode {
 pub struct Options {
     pub sync: SyncPolicy,
     pub wal_recovery: WalRecoveryMode,
+    /// Approximate memtable size in bytes at which it is frozen and flushed
+    /// to an SSTable in the background. Default 4 MiB.
+    pub memtable_size: usize,
+    /// Target size of an SSTable data block before its trailer. Default 4 KiB.
+    pub block_size: usize,
+    /// Bloom filter bits per key (1..=64). Default 10, about 1% false positives.
+    pub bloom_bits_per_key: usize,
 }
 
 impl Default for Options {
@@ -45,6 +52,9 @@ impl Default for Options {
         Options {
             sync: SyncPolicy::Always,
             wal_recovery: WalRecoveryMode::TolerateTornTail,
+            memtable_size: 4 * 1024 * 1024,
+            block_size: 4 * 1024,
+            bloom_bits_per_key: 10,
         }
     }
 }

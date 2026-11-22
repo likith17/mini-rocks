@@ -46,17 +46,7 @@ const KIND_DELETE: u8 = 2;
 /// Buffers bigger than this are released after a write instead of kept.
 const MAX_RETAINED_BUF: usize = 1024 * 1024;
 
-pub fn wal_file_name(number: u64) -> String {
-    format!("{number:06}.wal")
-}
-
-pub fn parse_wal_file_name(name: &str) -> Option<u64> {
-    let digits = name.strip_suffix(".wal")?;
-    if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) {
-        return None;
-    }
-    digits.parse().ok()
-}
+pub use crate::filename::wal_file_name;
 
 /// A record to append, borrowing its key and value.
 #[derive(Debug, Clone, Copy)]
@@ -423,15 +413,5 @@ mod tests {
         let mut rec = enc(RecordRef::Put { seq: 1, key: b"k", value: b"v" });
         rec[4..8].copy_from_slice(&u32::MAX.to_le_bytes());
         assert_eq!(decode(&rec), Decoded::Corrupt("record length exceeds maximum"));
-    }
-
-    #[test]
-    fn file_names() {
-        assert_eq!(wal_file_name(1), "000001.wal");
-        assert_eq!(parse_wal_file_name("000001.wal"), Some(1));
-        assert_eq!(parse_wal_file_name("1234567.wal"), Some(1234567));
-        assert_eq!(parse_wal_file_name("+1.wal"), None);
-        assert_eq!(parse_wal_file_name(".wal"), None);
-        assert_eq!(parse_wal_file_name("000001.sst"), None);
     }
 }

@@ -128,7 +128,7 @@ probability about 2⁻³² per byte offset.
 
 **Cost:** each WAL is read into memory whole. The resync scan is worst-case
 quadratic in the size of the damaged tail. Both are bounded by the memtable
-size once flushing lands.
+size, since a WAL is rotated at every flush (§6).
 
 ## 4. Memtable data structure (phase 1)
 
@@ -162,9 +162,117 @@ so older versions in the memtable would never be read.
 Memory accounting is approximate: key + value + 48 bytes per entry. It
 exists only to decide when the memtable is "full" (phase 2).
 
-## 5. Placeholders for later phases
+## 5. SSTable format (phase 2)
 
-* SSTable format (phase 2)
-* Bloom filter parameters (phase 3)
+```
+[data block]* [filter block] [meta block] [index block] [footer: 64 bytes]
+```
+
+Every block is followed by a CRC32 of its contents. The full layout is in
+the doc comment of `src/sstable.rs`.
+
+* **Data blocks (~4 KiB, configurable).** Keys are prefix-compressed. Every
+  16th key is a *restart point* stored in full, so a seek binary-searches the
+  restart points and then scans at most 16 entries. This is LevelDB's
+  scheme. It is worth having because LSM keys are usually long and share
+  prefixes (`user:000123`), and fewer bytes per key means less write and
+  space amplification. **Rejected:** fixed-width entries with an offset array
+  (simpler, but no prefix sharing) and block compression (snappy/zstd would
+  add a dependency, and phase 7 should first measure what uncompressed
+  costs).
+* **Each entry stores its sequence number and kind**, as a varint
+  `seq << 8 | kind` (put/delete). Tombstones are real entries: a delete has
+  to shadow older SSTables until compaction can prove nothing older remains.
+* **Index block: one entry per data block, keyed by the block's *last* key.**
+  A lookup finds the first block whose last key is ≥ the target, so one
+  binary search and one block read. LevelDB stores a shortened separator
+  instead of the last key to save index space. That is an optimisation I
+  left out.
+* **One Bloom filter for the whole file**, not one per block like LevelDB. A
+  phase 3 lookup asks "could this file have the key?" once per file, which
+  is exactly the question a whole-file filter answers. 10 bits/key and
+  k = round(10·ln 2) = 7 give a theoretical 0.82% false-positive rate (unit
+  test: < 1.5% measured). Probes use double hashing on one XXH64. XXH64 is
+  implemented in-crate (60 lines, checked against reference vectors) because
+  the filter is persisted and `std`'s hasher may change between Rust
+  releases. One more dependency would also work, but the code is small and
+  stable.
+* **Meta block:** entry count, tombstone count, min/max sequence number,
+  smallest and largest key. `max_seq` drives recovery (§6). The key range
+  will let range scans and compaction skip files.
+* **Footer:** three block handles, format version, a CRC over the footer, and
+  the magic number `"MiniRock"` in the **last** 8 bytes. A truncated file has
+  the wrong bytes where the magic should be, so it fails immediately. A test
+  checks every possible truncation length.
+* **Verification policy:** footer, index, filter and meta blocks are checked
+  when the file is opened. Data blocks are checked on every read. A flipped
+  byte anywhere is reported as `Corruption` and never returned as data. A
+  test flips every byte of a table to check this. Data blocks are not
+  pre-verified at open (RocksDB's `paranoid_checks`), because that would read
+  every table in full on startup.
+* Reads use positional I/O (`pread` / `seek_read`), so concurrent readers
+  share one file handle without a cursor lock. There is no block cache yet,
+  so every data-block read hits the OS page cache. Phase 3/7 will measure
+  this.
+
+## 6. Flush protocol and its crash points (phase 2)
+
+When the active memtable reaches `memtable_size` (default 4 MiB), the next
+writer, while holding the writer lock:
+
+1. fsyncs the current WAL, so it is complete on disk whatever the sync
+   policy;
+2. opens a new WAL (new file number, directory fsynced);
+3. moves the memtable into the single *immutable* slot and signals the
+   flush thread.
+
+The flush thread then:
+
+4. writes `NNNNNN.sst.tmp`, fsyncs it, renames it to `NNNNNN.sst`, and
+   fsyncs the directory;
+5. publishes the new table to readers and clears the immutable slot;
+6. deletes the old WAL(s).
+
+Readers always look at memtable → immutable → SSTables (newest first). The
+SSTable list is copy-on-write (`Arc<Vec<…>>`), so a reader holds the lock
+only long enough to clone two `Arc`s and does its I/O without it.
+
+**Why one immutable memtable and a write stall.** If the memtable fills again
+while the previous flush is still running, writers wait. More immutable
+memtables would smooth out bursts, but memory would grow without bound if
+the disk can't keep up. The stall makes backpressure explicit. RocksDB's
+default is 2 write buffers; this can grow later.
+
+| Crash during | State on disk | Recovery |
+|---|---|---|
+| 1–3 | old WAL (synced) + maybe a new empty WAL | both WALs replayed; nothing lost |
+| 4, before rename | `.sst.tmp` + both WALs | `.tmp` deleted (never referenced); WALs replayed |
+| after 4, before 6 | complete `.sst` + its WAL | WAL records with `seq ≤ max_seq` of any SSTable are **skipped**; WAL deleted |
+| after 6 | `.sst` + new WAL | normal |
+
+The skip by sequence number in the third row is essential. Replaying a
+stale WAL would put old values into the memtable, the *newest* layer, above
+newer SSTables. `stale_wal_after_flush_is_skipped_not_replayed` checks
+exactly this, and I confirmed it fails when the skip is disabled. The rule
+is sound because each flush covers a contiguous run of sequence numbers, and
+the memtable's highest sequence number is always present (it is the latest
+write to its key).
+
+**A flush failure poisons writes** (`Error::Poisoned`), the same as a WAL
+failure. Reads keep working from the immutable memtable. Reopening retries
+from the WALs.
+
+**How live SSTables are found in phase 2: listing the directory.** This is
+correct only because SSTables are never deleted yet: every `*.sst` is live,
+and a higher number means newer. Compaction (phase 5) breaks this, because
+inputs and outputs would both exist after a crash. The manifest (phase 4)
+replaces the listing then.
+
+**Recovery and older WALs.** An older WAL is still never allowed a torn
+tail (§3). Step 1 guarantees it was synced before any newer WAL was written.
+
+## 7. Placeholders for later phases
+
+* Bloom filter use on the read path, merge iterator for scans (phase 3)
 * Manifest format and atomic replacement (phase 4)
 * Compaction strategy: size-tiered vs. leveled (phase 5)
