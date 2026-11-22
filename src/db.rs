@@ -10,6 +10,7 @@ use crate::error::{Error, Result};
 use crate::filename::{self, FileKind};
 use crate::fsutil;
 use crate::iter::{DbIter, Source};
+use crate::manifest::{self, ManifestState, ManifestWriter, VersionEdit};
 use crate::memtable::{is_empty_range, Lookup, MemTable};
 use crate::options::{Options, SyncPolicy, WalRecoveryMode};
 use crate::sstable::{self, SstIter, SstReader};
@@ -23,18 +24,30 @@ pub const MAX_VALUE_LEN: usize = 32 * 1024 * 1024;
 /// What recovery did when the database was opened.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct RecoveryReport {
-    /// SSTables found and opened.
+    /// Edits replayed from the manifest named by `CURRENT`.
+    pub manifest_edits_replayed: usize,
+    /// Bytes of a torn final manifest edit that were ignored (an edit that
+    /// was never committed, because a crash interrupted its write).
+    pub manifest_torn_bytes: u64,
+    /// Live SSTables opened, as listed by the manifest.
     pub sst_files: usize,
+    /// SSTables present on disk but not in the manifest, deleted: a flush
+    /// that crashed before committing its manifest edit.
+    pub orphan_ssts_removed: usize,
+    /// SSTables adopted from a directory without a manifest (one created by
+    /// phase 2/3 code).
+    pub ssts_adopted_without_manifest: usize,
     pub wal_files_replayed: usize,
     /// WAL records applied to the memtable.
     pub records_replayed: u64,
-    /// WAL records skipped because an SSTable already holds them. This
-    /// happens after a crash between installing an SSTable and deleting its
-    /// WAL.
+    /// WAL records skipped because an SSTable already holds them.
     pub records_already_flushed: u64,
-    /// Fully flushed WALs deleted during recovery.
+    /// WALs deleted during recovery because SSTables already hold all their
+    /// data (below the manifest's log number, or fully covered by sequence
+    /// number).
     pub wal_files_deleted: usize,
-    /// Leftover `*.sst.tmp` files from an interrupted flush, deleted.
+    /// Leftover `*.sst.tmp` / `CURRENT.tmp` files from an interrupted write,
+    /// deleted.
     pub temp_files_removed: usize,
     /// Bytes cut from WAL tails (torn or corrupt records, trailing garbage),
     /// plus the size of any later WAL files set aside in `PointInTime` mode.
@@ -103,6 +116,9 @@ struct Inner {
     /// Set if a background flush fails. Writes then fail until reopen.
     bg_error: Mutex<Option<String>>,
     flush_tx: Sender<FlushMsg>,
+    /// Appends version edits; locked by whoever changes the set of live
+    /// SSTables (the flush thread, and the compaction thread later).
+    manifest: Mutex<ManifestWriter>,
     recovery: RecoveryReport,
     stats: StatCounters,
 }
@@ -129,6 +145,9 @@ struct Immutable {
     mem: Arc<MemTable>,
     wals: Vec<u64>,
     sst_number: u64,
+    /// The WAL started at rotation: once this flush commits, every older WAL
+    /// is obsolete, so this becomes the manifest's log number.
+    next_log_number: u64,
 }
 
 enum FlushMsg {
@@ -137,8 +156,9 @@ enum FlushMsg {
 }
 
 impl Db {
-    /// Open (or create) the database in `dir`: load SSTables, replay any WAL
-    /// records they don't already hold, and start the flush thread.
+    /// Open (or create) the database in `dir`: read the manifest, open the
+    /// SSTables it lists, replay WAL records not yet in an SSTable, write a
+    /// fresh manifest, and start the flush thread.
     pub fn open(dir: impl AsRef<Path>, options: Options) -> Result<Db> {
         validate(&options)?;
         let dir = dir.as_ref().to_path_buf();
@@ -150,11 +170,13 @@ impl Db {
         let mut max_number = 0u64;
         let mut wal_numbers = Vec::new();
         let mut sst_numbers = Vec::new();
+        let mut manifest_numbers = Vec::new();
         for (number, kind) in list_files(&dir)? {
             max_number = max_number.max(number);
             match kind {
                 FileKind::Wal => wal_numbers.push(number),
                 FileKind::Sst => sst_numbers.push(number),
+                FileKind::Manifest => manifest_numbers.push(number),
                 FileKind::TempSst => {
                     // Never renamed into place, so its data is still in a WAL.
                     fs::remove_file(dir.join(filename::temp_sst_file_name(number)))?;
@@ -163,27 +185,95 @@ impl Db {
                 FileKind::DiscardedWal => {}
             }
         }
+        let current_tmp = dir.join(filename::CURRENT_TMP);
+        if current_tmp.exists() {
+            // Never renamed over CURRENT, so the old CURRENT still stands.
+            fs::remove_file(&current_tmp)?;
+            report.temp_files_removed += 1;
+        }
         if report.temp_files_removed > 0 {
             fsutil::sync_dir(&dir)?;
         }
         wal_numbers.sort_unstable();
-        sst_numbers.sort_unstable_by(|a, b| b.cmp(a));
 
-        // 2. SSTables. A damaged SSTable is an error: it was fsynced before
-        //    being renamed into place, so damage means real corruption.
+        // 2. The manifest decides which SSTables are live.
+        let mut state = match manifest::read_current(&dir)? {
+            Some(n) => {
+                let path = dir.join(filename::manifest_file_name(n));
+                if !path.exists() {
+                    return Err(Error::Corruption(format!("CURRENT names {}, which does not exist", path.display())));
+                }
+                let contents = manifest::read_manifest(&path)?;
+                report.manifest_edits_replayed = contents.edits;
+                report.manifest_torn_bytes = contents.torn_bytes;
+                contents.state
+            }
+            None if !manifest_numbers.is_empty() => {
+                return Err(Error::Corruption(
+                    "manifest files exist but CURRENT is missing; refusing to guess which is live".into(),
+                ));
+            }
+            None => {
+                // A new database, or one written before the manifest existed
+                // (phases 2-3), where every SSTable present was live.
+                let mut s = ManifestState::default();
+                for &n in &sst_numbers {
+                    s.files.insert(n, fs::metadata(dir.join(filename::sst_file_name(n)))?.len());
+                }
+                report.ssts_adopted_without_manifest = sst_numbers.len();
+                s
+            }
+        };
+
+        // 3. SSTables the manifest doesn't list were never committed (a
+        //    flush crashed before its manifest edit), or were already
+        //    superseded. Their data is elsewhere, so delete them.
+        for &n in &sst_numbers {
+            if !state.files.contains_key(&n) {
+                fs::remove_file(dir.join(filename::sst_file_name(n)))?;
+                report.orphan_ssts_removed += 1;
+            }
+        }
+
+        // 4. Open the live SSTables. A missing, resized or damaged one is
+        //    corruption: it was fsynced before its edit was committed.
         let mut ssts = Vec::new();
         let mut flushed_seq = 0u64;
-        for &n in &sst_numbers {
-            let t = SstReader::open(&dir.join(filename::sst_file_name(n)), n)?;
+        for (&n, &size) in &state.files {
+            let path = dir.join(filename::sst_file_name(n));
+            if !path.exists() {
+                return Err(Error::Corruption(format!("live SSTable {} is missing", path.display())));
+            }
+            let t = SstReader::open(&path, n)?;
+            if t.meta().file_size != size {
+                return Err(Error::Corruption(format!(
+                    "{}: manifest says {size} bytes, file has {}",
+                    path.display(),
+                    t.meta().file_size
+                )));
+            }
             flushed_seq = flushed_seq.max(t.meta().max_seq);
             ssts.push(Arc::new(t));
         }
+        // Order by data age, newest first. Not by file number: a compaction
+        // output (phase 5) gets a new, high number but holds older data than
+        // tables flushed while it ran.
+        ssts.sort_by_key(|t| std::cmp::Reverse((t.meta().max_seq, t.number())));
         report.sst_files = ssts.len();
 
-        // 3. WAL replay. Each flush covers every sequence number up to its
-        //    SSTable's max_seq, so records at or below `flushed_seq` are
-        //    already on disk in a newer form and must NOT be replayed:
-        //    replaying them would put stale values above newer SSTables.
+        // 5. WALs below the manifest's log number hold only flushed data:
+        //    a crash hit between committing a flush and deleting its WAL.
+        let (obsolete, wal_numbers): (Vec<u64>, Vec<u64>) =
+            wal_numbers.into_iter().partition(|&n| n < state.log_number);
+        for &n in &obsolete {
+            fs::remove_file(dir.join(wal::wal_file_name(n)))?;
+            report.wal_files_deleted += 1;
+        }
+
+        // 6. WAL replay. Records at or below `flushed_seq` are already in an
+        //    SSTable and must NOT be replayed: that would put stale values
+        //    above newer SSTables. (With the manifest's log number this
+        //    should never trigger; it is kept as a second line of defence.)
         let mut mem = MemTable::new();
         let mut max_seq = flushed_seq;
         let mut replayed: Vec<(u64, bool)> = Vec::new(); // (number, has unflushed records)
@@ -254,9 +344,16 @@ impl Db {
             }
         }
 
-        // 4. Keep appending to the newest WAL. Older WALs with nothing left
+        // 7. Keep appending to the newest WAL. Older WALs with nothing left
         //    to replay are fully covered by SSTables, so delete them.
-        let active = replayed.last().map_or(max_number + 1, |&(n, _)| n);
+        let mut next_file_number = state.next_file_number.max(max_number + 1);
+        let active = match replayed.last() {
+            Some(&(n, _)) => n,
+            None => {
+                next_file_number += 1;
+                next_file_number - 1
+            }
+        };
         let mut mem_wals = Vec::new();
         for &(n, has_unflushed) in &replayed {
             if n == active || has_unflushed {
@@ -274,20 +371,32 @@ impl Db {
         }
         let wal = WalWriter::open(&dir.join(wal::wal_file_name(active)), options.sync)?;
 
+        // 8. Start a fresh manifest holding one snapshot edit, switch CURRENT
+        //    to it atomically, then delete the old manifest(s). This keeps
+        //    the manifest from growing across restarts and drops any torn
+        //    tail. A crash before the switch leaves the old CURRENT valid.
+        state.log_number = *mem_wals.iter().min().unwrap();
+        let manifest_number = next_file_number;
+        next_file_number += 1;
+        state.next_file_number = next_file_number;
+        let manifest = ManifestWriter::create(&dir, manifest_number, &state)?;
+        for &n in &manifest_numbers {
+            fs::remove_file(dir.join(filename::manifest_file_name(n)))?;
+        }
+        if !manifest_numbers.is_empty() {
+            fsutil::sync_dir(&dir)?;
+        }
+
         let (flush_tx, flush_rx) = mpsc::channel();
         let inner = Arc::new(Inner {
             dir,
             options,
-            writer: Mutex::new(WriterState {
-                wal,
-                next_seq: max_seq + 1,
-                next_file_number: max_number.max(active) + 1,
-                mem_wals,
-            }),
+            writer: Mutex::new(WriterState { wal, next_seq: max_seq + 1, next_file_number, mem_wals }),
             flushed: Condvar::new(),
             state: RwLock::new(ReadState { mem, imm: None, ssts: Arc::new(ssts) }),
             bg_error: Mutex::new(None),
             flush_tx,
+            manifest: Mutex::new(manifest),
             recovery: report,
             stats: StatCounters::default(),
         });
@@ -520,7 +629,7 @@ impl Inner {
         {
             let mut s = self.state_write();
             let mem = std::mem::take(&mut s.mem);
-            s.imm = Some(Arc::new(Immutable { mem: Arc::new(mem), wals, sst_number }));
+            s.imm = Some(Arc::new(Immutable { mem: Arc::new(mem), wals, sst_number, next_log_number: wal_number }));
         }
         let _ = self.flush_tx.send(FlushMsg::Flush);
         Ok(())
@@ -542,10 +651,12 @@ impl Inner {
         }
     }
 
-    /// Write the immutable memtable to an SSTable, install it, then delete
-    /// the WALs it came from. Runs on the flush thread.
+    /// Write the immutable memtable to an SSTable, commit it to the manifest,
+    /// install it, then delete the WALs it came from. Runs on the flush
+    /// thread.
     fn flush_imm(&self) {
         let Some(imm) = self.state_read().imm.clone() else { return };
+        let path = self.dir.join(filename::sst_file_name(imm.sst_number));
         let result = sstable::build_table(
             &self.dir,
             imm.sst_number,
@@ -553,7 +664,20 @@ impl Inner {
             self.options.block_size,
             self.options.bloom_bits_per_key,
         )
-        .and_then(|_| SstReader::open(&self.dir.join(filename::sst_file_name(imm.sst_number)), imm.sst_number));
+        .and_then(|_| SstReader::open(&path, imm.sst_number))
+        .and_then(|table| {
+            // The commit point. Before this edit is synced, a crash leaves
+            // the SSTable as an orphan (deleted on recovery) and the WAL
+            // replays. After it, the WALs are obsolete.
+            let edit = VersionEdit {
+                log_number: Some(imm.next_log_number),
+                next_file_number: Some(imm.sst_number + 1),
+                added: vec![(imm.sst_number, table.meta().file_size)],
+                deleted: Vec::new(),
+            };
+            self.manifest.lock().unwrap_or_else(|e| e.into_inner()).append(&edit)?;
+            Ok(table)
+        });
 
         match result {
             Ok(table) => {
@@ -565,9 +689,9 @@ impl Inner {
                     s.ssts = Arc::new(ssts);
                     s.imm = None;
                 }
-                // The SSTable is durable and installed, so the WALs are
-                // redundant. If a crash hits before this, recovery skips their
-                // records by sequence number. Failure to delete is harmless.
+                // The SSTable is committed and installed, so the WALs are
+                // redundant. If a crash hits before this, recovery deletes
+                // them by log number. Failure to delete is harmless.
                 for &n in &imm.wals {
                     let _ = fs::remove_file(self.dir.join(wal::wal_file_name(n)));
                 }

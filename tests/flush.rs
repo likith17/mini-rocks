@@ -167,9 +167,10 @@ fn concurrent_readers_during_flushes() {
 
 // ------------------------------------------------- crash windows of a flush
 
-/// Crash after the SSTable was installed but before its WAL was deleted.
+/// Crash after the SSTable was committed but before its WAL was deleted.
 /// Replaying that WAL naively would put the old value ABOVE the newer
-/// SSTable; recovery must skip records the SSTables already hold.
+/// SSTable. Since phase 4 the manifest's log number marks the WAL obsolete,
+/// so it is deleted without being read.
 #[test]
 fn stale_wal_after_flush_is_skipped_not_replayed() {
     let dir = TempDir::new("flush-stale-wal");
@@ -193,7 +194,8 @@ fn stale_wal_after_flush_is_skipped_not_replayed() {
     let r = db.recovery_report().clone();
     assert_eq!(db.get(b"k").unwrap(), Some(b"v2".to_vec()));
     assert_eq!(db.get(b"only-in-old-wal").unwrap(), Some(b"x".to_vec()));
-    assert_eq!(r.records_already_flushed, 2);
+    assert_eq!(r.records_already_flushed, 0);
+    assert_eq!(r.wal_files_replayed, 1); // only the active (empty) WAL
     assert_eq!(r.records_replayed, 0);
     assert_eq!(r.wal_files_deleted, 1);
     assert!(!dir.path().join(&stale_name).exists());

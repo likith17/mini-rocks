@@ -9,6 +9,15 @@ pub enum FileKind {
     TempSst,
     /// A WAL set aside by `PointInTime` recovery. Kept for inspection.
     DiscardedWal,
+    Manifest,
+}
+
+/// Names the active manifest. Replaced atomically via `CURRENT.tmp`.
+pub const CURRENT: &str = "CURRENT";
+pub const CURRENT_TMP: &str = "CURRENT.tmp";
+
+pub fn manifest_file_name(number: u64) -> String {
+    format!("MANIFEST-{number:06}")
 }
 
 pub fn wal_file_name(number: u64) -> String {
@@ -24,6 +33,10 @@ pub fn temp_sst_file_name(number: u64) -> String {
 }
 
 pub fn parse_file_name(name: &str) -> Option<(u64, FileKind)> {
+    let digits_only = |d: &str| !d.is_empty() && d.bytes().all(|b| b.is_ascii_digit());
+    if let Some(digits) = name.strip_prefix("MANIFEST-") {
+        return digits_only(digits).then(|| digits.parse().ok()).flatten().map(|n| (n, FileKind::Manifest));
+    }
     // Longest suffixes first.
     const SUFFIXES: [(&str, FileKind); 4] = [
         (".wal.discarded", FileKind::DiscardedWal),
@@ -56,5 +69,10 @@ mod tests {
         assert_eq!(parse_file_name("+1.wal"), None);
         assert_eq!(parse_file_name(".sst"), None);
         assert_eq!(parse_file_name("LOCK"), None);
+        assert_eq!(parse_file_name("MANIFEST-000004"), Some((4, FileKind::Manifest)));
+        assert_eq!(parse_file_name(&manifest_file_name(12)), Some((12, FileKind::Manifest)));
+        assert_eq!(parse_file_name("MANIFEST-"), None);
+        assert_eq!(parse_file_name("MANIFEST-12x"), None);
+        assert_eq!(parse_file_name(CURRENT), None);
     }
 }

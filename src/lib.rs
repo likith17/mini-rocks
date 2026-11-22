@@ -2,9 +2,10 @@
 //! merge tree.
 //!
 //! Done so far: the write-ahead log, the memtable, crash recovery (phase 1),
-//! the SSTable format with background flushing (phase 2), and the read path
-//! with Bloom filters and a streaming merge iterator (phase 3). The manifest
-//! and compaction come in later phases.
+//! the SSTable format with background flushing (phase 2), the read path
+//! with Bloom filters and a streaming merge iterator (phase 3), and the
+//! manifest that records which SSTables are live (phase 4). Compaction comes
+//! next.
 //!
 //! # Durability contract
 //!
@@ -32,6 +33,7 @@ pub mod filename;
 mod fsutil;
 mod hash;
 mod iter;
+pub mod manifest;
 pub mod memtable;
 mod options;
 pub mod sstable;

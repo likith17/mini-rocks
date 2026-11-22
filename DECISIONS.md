@@ -262,11 +262,10 @@ write to its key).
 failure. Reads keep working from the immutable memtable. Reopening retries
 from the WALs.
 
-**How live SSTables are found in phase 2: listing the directory.** This is
-correct only because SSTables are never deleted yet: every `*.sst` is live,
-and a higher number means newer. Compaction (phase 5) breaks this, because
-inputs and outputs would both exist after a crash. The manifest (phase 4)
-replaces the listing then.
+**How live SSTables were found in phase 2: listing the directory.** This
+was correct only because SSTables were never deleted: every `*.sst` was
+live, and a higher number meant newer. Compaction breaks both assumptions.
+Since phase 4 the manifest decides (§8).
 
 **Recovery and older WALs.** An older WAL is still never allowed a torn
 tail (§3). Step 1 guarantees it was synced before any newer WAL was written.
@@ -334,7 +333,88 @@ matters is a phase 7 measurement, not a guess.
 probes, false positives, scan range skips, data blocks read. These feed the
 phase 7 benchmarks.
 
-## 8. Placeholders for later phases
+## 8. Manifest (phase 4)
 
-* Manifest format and atomic replacement (phase 4)
+The manifest replaces "every `*.sst` in the directory is live" (§6) with an
+explicit record, which compaction needs. After a compaction crash, both
+the inputs and the output exist on disk, and only a commit record can say
+which set is live.
+
+**Format** (`src/manifest.rs`). `MANIFEST-NNNNNN` is an append-only log of
+*version edits*. Each edit is framed as `crc32 | len | payload`, with the
+CRC covering the length, as in the WAL. Payload tags:
+
+* `log_number`: WALs below this are obsolete;
+* `next_file_number`;
+* `add(number, file_size)`;
+* `delete(number)`.
+
+An unknown tag is corruption, so old code never misreads a newer format.
+`CURRENT` holds the active manifest's name and is replaced atomically
+(`CURRENT.tmp`, fsync, rename, fsync the directory).
+
+**Rejected:** rewriting a whole "list of live files" atomically on every
+change. A flush would then cost a full file write and a rename instead of
+one small append and one fsync, and the manifest grows with every compaction
+too. The log-plus-snapshot design is LevelDB's, for the same reasons.
+
+**Commit protocol for a flush** (extends §6):
+
+1. Write the SSTable to `.tmp`, fsync it, rename it, fsync the directory.
+2. Append `{add(sst, size), log_number = new WAL}` to the manifest and
+   fsync. **This is the commit point.**
+3. Install the table for readers.
+4. Delete the old WAL(s).
+
+| Crash between | On restart |
+|---|---|
+| 1 and 2 | The SSTable isn't in the manifest, so it is an **orphan** and deleted. Its WAL is ≥ log_number and is replayed. |
+| 2 and 4 | The WAL is below log_number, so it is deleted unread. |
+| inside 2 (torn edit) | The torn tail is ignored, so this is the same as the first row. |
+
+A test cuts the manifest at **every byte** of the final flush edit and
+checks each result: the orphan is removed, the WAL's 50 records are replayed,
+and the contents are exact.
+
+**Recovery is manifest-driven:**
+
+* No `CURRENT` but `MANIFEST-*` files exist → corruption. We don't guess
+  which manifest is live.
+* `CURRENT` names a missing file, or holds garbage → corruption.
+* A torn final edit → ignored (it was never committed). An invalid edit
+  followed by a valid one → corruption. This is the same resync rule as the
+  WAL (§3).
+* A listed SSTable that is missing, or whose size differs from what the
+  manifest recorded → corruption. It was fsynced before being committed, so
+  this can't be a crash artefact.
+* An SSTable on disk but not listed → orphan, deleted. Deleting is safe
+  because nothing committed ever referred to it.
+* No `CURRENT` and no manifests → a new database, or one written by phase
+  2/3 code. Every SSTable present is adopted. This is correct for those
+  versions because they never deleted an SSTable.
+
+**Snapshot on every open.** `open` writes a new manifest holding one
+snapshot edit of the recovered state, switches `CURRENT` to it, and deletes
+the old manifest. A crash before the switch leaves the old `CURRENT` valid.
+This bounds the manifest's size by the number of live tables, not the
+history, and discards any torn tail. **Cost, measured:** about 8 ms more per
+`open` on this Windows machine (a file create, two fsyncs, a rename). The
+phase 1 truncation test, which opens the database about 4,000 times, went
+from 20 s to 52 s. The manifest isn't rotated at runtime yet: a flush edit
+is about 10 bytes, so even 100,000 flushes between restarts produce only
+about 1 MB.
+
+**SSTable order is now by data age (`max_seq`), not file number.** A size-tiered
+compaction output gets a new, high file number but holds older data than
+tables flushed while it ran. Ordering by number would let stale data shadow
+new data. Ordering by `max_seq` is correct as long as compaction merges only
+runs of tables adjacent in age, so sequence ranges never interleave. Phase 5
+must guarantee that.
+
+**The sequence-number skip from §6 stays** as a second line of defence. With
+log numbers it shouldn't trigger (`records_already_flushed` is now 0 in the
+stale-WAL test), but it costs nothing and is sound.
+
+## 9. Placeholders for later phases
+
 * Compaction strategy: size-tiered vs. leveled (phase 5)
