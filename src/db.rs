@@ -1,7 +1,7 @@
-use std::collections::BTreeMap;
 use std::fs;
 use std::ops::Bound;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, RwLock, RwLockReadGuard, RwLockWriteGuard};
 use std::thread::JoinHandle;
@@ -9,6 +9,7 @@ use std::thread::JoinHandle;
 use crate::error::{Error, Result};
 use crate::filename::{self, FileKind};
 use crate::fsutil;
+use crate::iter::{DbIter, Source};
 use crate::memtable::{is_empty_range, Lookup, MemTable};
 use crate::options::{Options, SyncPolicy, WalRecoveryMode};
 use crate::sstable::{self, SstIter, SstReader};
@@ -42,6 +43,45 @@ pub struct RecoveryReport {
     pub discard_reason: Option<String>,
 }
 
+/// Read-path counters since the database was opened.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ReadStats {
+    /// Calls to [`Db::get`].
+    pub gets: u64,
+    /// Gets answered by the active or immutable memtable (value or tombstone).
+    pub memtable_hits: u64,
+    /// SSTables skipped because the key is outside their key range.
+    pub range_skips: u64,
+    /// SSTables skipped because their Bloom filter ruled the key out.
+    pub bloom_skips: u64,
+    /// SSTables actually searched (index lookup plus one data block read).
+    pub sst_probes: u64,
+    /// Probes where the filter said "maybe" but the key wasn't there. Over
+    /// absent keys, `bloom_false_positives / (bloom_false_positives +
+    /// bloom_skips)` is the measured false-positive rate.
+    pub bloom_false_positives: u64,
+    /// SSTables skipped by range scans because their key range doesn't
+    /// overlap the scan.
+    pub scan_range_skips: u64,
+    /// Data blocks read from disk by the currently live SSTables.
+    pub data_blocks_read: u64,
+}
+
+#[derive(Default)]
+struct StatCounters {
+    gets: AtomicU64,
+    memtable_hits: AtomicU64,
+    range_skips: AtomicU64,
+    bloom_skips: AtomicU64,
+    sst_probes: AtomicU64,
+    bloom_false_positives: AtomicU64,
+    scan_range_skips: AtomicU64,
+}
+
+fn bump(c: &AtomicU64) {
+    c.fetch_add(1, Ordering::Relaxed);
+}
+
 /// A MiniRocks database. `Db` is `Send + Sync`; share it with `Arc`.
 ///
 /// Data lives in three layers, newest first: the active memtable, at most
@@ -64,6 +104,7 @@ struct Inner {
     bg_error: Mutex<Option<String>>,
     flush_tx: Sender<FlushMsg>,
     recovery: RecoveryReport,
+    stats: StatCounters,
 }
 
 struct WriterState {
@@ -85,7 +126,7 @@ struct ReadState {
 
 /// A frozen memtable waiting to be written to `sst_number`.
 struct Immutable {
-    mem: MemTable,
+    mem: Arc<MemTable>,
     wals: Vec<u64>,
     sst_number: u64,
 }
@@ -248,6 +289,7 @@ impl Db {
             bg_error: Mutex::new(None),
             flush_tx,
             recovery: report,
+            stats: StatCounters::default(),
         });
         let bg = Arc::clone(&inner);
         let flusher = std::thread::Builder::new()
@@ -276,66 +318,111 @@ impl Db {
         self.inner.write(key, None)
     }
 
-    /// Newest value for `key`, searching memtable, immutable memtable, then
-    /// SSTables newest to oldest, and stopping at the first entry found (a
-    /// tombstone means "deleted").
+    /// Newest value for `key`. Searches the memtable, the immutable memtable,
+    /// then SSTables newest to oldest, and stops at the first entry found (a
+    /// tombstone means "deleted"). An SSTable is read only if the key is
+    /// inside its key range *and* its Bloom filter says "maybe".
     pub fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>> {
+        let stats = &self.inner.stats;
+        bump(&stats.gets);
         let (imm, ssts) = {
             let s = self.inner.state_read();
             match s.mem.get(key) {
-                Lookup::Value(v) => return Ok(Some(v.to_vec())),
-                Lookup::Deleted => return Ok(None),
+                Lookup::Value(v) => {
+                    bump(&stats.memtable_hits);
+                    return Ok(Some(v.to_vec()));
+                }
+                Lookup::Deleted => {
+                    bump(&stats.memtable_hits);
+                    return Ok(None);
+                }
                 Lookup::NotFound => {}
             }
             (s.imm.clone(), Arc::clone(&s.ssts))
         };
         if let Some(imm) = imm {
             match imm.mem.get(key) {
-                Lookup::Value(v) => return Ok(Some(v.to_vec())),
-                Lookup::Deleted => return Ok(None),
+                Lookup::Value(v) => {
+                    bump(&stats.memtable_hits);
+                    return Ok(Some(v.to_vec()));
+                }
+                Lookup::Deleted => {
+                    bump(&stats.memtable_hits);
+                    return Ok(None);
+                }
                 Lookup::NotFound => {}
             }
         }
-        // Phase 2 reads every SSTable; Bloom-filter skipping comes in phase 3.
         for t in ssts.iter() {
-            if let Some(entry) = t.get(key)? {
-                return Ok(entry.value);
+            if !t.key_in_range(key) {
+                bump(&stats.range_skips);
+                continue;
+            }
+            if !t.may_contain(key) {
+                bump(&stats.bloom_skips);
+                continue;
+            }
+            bump(&stats.sst_probes);
+            match t.get(key)? {
+                Some(entry) => return Ok(entry.value),
+                None => bump(&stats.bloom_false_positives),
             }
         }
         Ok(None)
     }
 
-    /// All live key-value pairs with keys inside the bounds, in ascending key
-    /// order, from a consistent snapshot.
+    /// Iterate over live key-value pairs with keys inside the bounds, in
+    /// ascending key order, from a snapshot taken now. Writes, deletes and
+    /// flushes after this call are not visible to the iterator.
     ///
-    /// Phase 2 implementation: overlays every layer (oldest first) into a
-    /// map, so memory is proportional to the range. Phase 3 replaces this
-    /// with a streaming merge iterator.
-    pub fn scan(&self, start: Bound<&[u8]>, end: Bound<&[u8]>) -> Result<Vec<(Vec<u8>, Vec<u8>)>> {
+    /// The active memtable's part of the range is copied at creation (at
+    /// most `memtable_size`); everything else is read lazily, one block at a
+    /// time. SSTables whose key range doesn't overlap the bounds are skipped.
+    pub fn iter(&self, start: Bound<&[u8]>, end: Bound<&[u8]>) -> Result<DbIter> {
+        let owned_end = end.map(<[u8]>::to_vec);
         if is_empty_range(start, end) {
-            return Ok(Vec::new());
+            return Ok(DbIter::new(Vec::new(), owned_end));
         }
         let (mem_entries, imm, ssts) = {
             let s = self.inner.state_read();
-            let mem: Vec<_> = s.mem.range(start, end).map(|(k, e)| (k.to_vec(), e.value.clone())).collect();
+            let mem: Vec<_> = s.mem.range(start, end).map(|(k, e)| (k.to_vec(), e.clone())).collect();
             (mem, s.imm.clone(), Arc::clone(&s.ssts))
         };
-        let mut merged: BTreeMap<Vec<u8>, Option<Vec<u8>>> = BTreeMap::new();
-        for t in ssts.iter().rev() {
+        // Newest first: the merge breaks ties in favour of lower indices.
+        let mut sources = vec![Source::copied(mem_entries)];
+        if let Some(imm) = imm {
+            sources.push(Source::frozen(Arc::clone(&imm.mem), start));
+        }
+        for t in ssts.iter() {
+            if !t.overlaps(start, end) {
+                bump(&self.inner.stats.scan_range_skips);
+                continue;
+            }
             let mut it = SstIter::new(Arc::clone(t));
             it.seek_bound(start)?;
-            while it.valid() && !past_end(it.key(), end) {
-                merged.insert(it.key().to_vec(), it.entry()?.value);
-                it.next()?;
-            }
+            sources.push(Source::Sst(it));
         }
-        if let Some(imm) = imm {
-            for (k, e) in imm.mem.range(start, end) {
-                merged.insert(k.to_vec(), e.value.clone());
-            }
+        Ok(DbIter::new(sources, owned_end))
+    }
+
+    /// All live key-value pairs inside the bounds, collected from [`Db::iter`].
+    pub fn scan(&self, start: Bound<&[u8]>, end: Bound<&[u8]>) -> Result<Vec<(Vec<u8>, Vec<u8>)>> {
+        self.iter(start, end)?.collect()
+    }
+
+    pub fn stats(&self) -> ReadStats {
+        let c = &self.inner.stats;
+        let load = |a: &AtomicU64| a.load(Ordering::Relaxed);
+        ReadStats {
+            gets: load(&c.gets),
+            memtable_hits: load(&c.memtable_hits),
+            range_skips: load(&c.range_skips),
+            bloom_skips: load(&c.bloom_skips),
+            sst_probes: load(&c.sst_probes),
+            bloom_false_positives: load(&c.bloom_false_positives),
+            scan_range_skips: load(&c.scan_range_skips),
+            data_blocks_read: self.inner.state_read().ssts.iter().map(|t| t.blocks_read()).sum(),
         }
-        merged.extend(mem_entries);
-        Ok(merged.into_iter().filter_map(|(k, v)| v.map(|v| (k, v))).collect())
     }
 
     /// fsync the WAL now, making every acknowledged write durable regardless
@@ -433,7 +520,7 @@ impl Inner {
         {
             let mut s = self.state_write();
             let mem = std::mem::take(&mut s.mem);
-            s.imm = Some(Arc::new(Immutable { mem, wals, sst_number }));
+            s.imm = Some(Arc::new(Immutable { mem: Arc::new(mem), wals, sst_number }));
         }
         let _ = self.flush_tx.send(FlushMsg::Flush);
         Ok(())
@@ -544,14 +631,6 @@ fn check_key(key: &[u8]) -> Result<()> {
         )));
     }
     Ok(())
-}
-
-fn past_end(key: &[u8], end: Bound<&[u8]>) -> bool {
-    match end {
-        Bound::Included(e) => key > e,
-        Bound::Excluded(e) => key >= e,
-        Bound::Unbounded => false,
-    }
 }
 
 /// Recognised files in `dir` (anything else is ignored).

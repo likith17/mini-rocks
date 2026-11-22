@@ -36,6 +36,7 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{BufWriter, Write};
 use std::ops::Bound;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use crate::block::{Block, BlockBuilder, BlockIter, DATA_RESTART_INTERVAL};
@@ -288,6 +289,8 @@ pub struct SstReader {
     index: Vec<(Vec<u8>, BlockHandle)>,
     bloom: Bloom,
     meta: SstMeta,
+    /// Data blocks read from disk by this reader (for statistics).
+    blocks_read: AtomicU64,
 }
 
 impl SstReader {
@@ -343,7 +346,7 @@ impl SstReader {
             return Err(corrupt("index and meta block disagree about emptiness"));
         }
 
-        Ok(SstReader { file, path: path.to_path_buf(), number, index, bloom, meta })
+        Ok(SstReader { file, path: path.to_path_buf(), number, index, bloom, meta, blocks_read: AtomicU64::new(0) })
     }
 
     pub fn number(&self) -> u64 {
@@ -367,6 +370,31 @@ impl SstReader {
         self.bloom.may_contain(key)
     }
 
+    /// Whether `key` lies within `[smallest_key, largest_key]`.
+    pub fn key_in_range(&self, key: &[u8]) -> bool {
+        self.meta.num_entries > 0 && self.meta.smallest_key.as_slice() <= key && key <= self.meta.largest_key.as_slice()
+    }
+
+    /// Whether any key in the table could fall inside the bounds.
+    pub fn overlaps(&self, start: Bound<&[u8]>, end: Bound<&[u8]>) -> bool {
+        let (small, large) = (self.meta.smallest_key.as_slice(), self.meta.largest_key.as_slice());
+        let start_ok = match start {
+            Bound::Included(s) => large >= s,
+            Bound::Excluded(s) => large > s,
+            Bound::Unbounded => true,
+        };
+        let end_ok = match end {
+            Bound::Included(e) => small <= e,
+            Bound::Excluded(e) => small < e,
+            Bound::Unbounded => true,
+        };
+        self.meta.num_entries > 0 && start_ok && end_ok
+    }
+
+    pub fn blocks_read(&self) -> u64 {
+        self.blocks_read.load(Ordering::Relaxed)
+    }
+
     /// Point lookup. `Ok(None)`: no entry for `key` in this file.
     /// `Ok(Some(entry))` with `entry.value == None`: a tombstone.
     /// Does not consult the Bloom filter; callers decide that.
@@ -385,6 +413,7 @@ impl SstReader {
     }
 
     fn load_block(&self, idx: usize) -> Result<BlockIter> {
+        self.blocks_read.fetch_add(1, Ordering::Relaxed);
         Ok(Block::new(read_block(&self.file, &self.path, self.index[idx].1)?)?.into_iter())
     }
 }

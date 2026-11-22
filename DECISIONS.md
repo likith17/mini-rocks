@@ -271,8 +271,70 @@ replaces the listing then.
 **Recovery and older WALs.** An older WAL is still never allowed a torn
 tail (§3). Step 1 guarantees it was synced before any newer WAL was written.
 
-## 7. Placeholders for later phases
+## 7. Read path (phase 3)
 
-* Bloom filter use on the read path, merge iterator for scans (phase 3)
+**Point lookups** check memtable → immutable memtable → SSTables newest to
+oldest and stop at the first entry for the key. A tombstone stops the search
+too: it means "deleted", not "keep looking". Before reading an SSTable, two
+free in-memory checks run in order:
+
+1. **Key range**: skip if the key is outside `[smallest_key, largest_key]`
+   (from the meta block). This decides everything when data arrives in key
+   order, because SSTables then don't overlap.
+2. **Bloom filter**: skip if the filter says "definitely absent". This is
+   what matters when SSTables overlap (random writes, and after size-tiered
+   compaction).
+
+Only then is the in-memory index binary-searched and one data block read.
+
+Measured (`tests/read_path.rs`, 20,000 shuffled keys in 109 overlapping
+SSTables, 10 bits/key):
+
+| Workload | Without filters (would be) | Measured |
+|---|---|---|
+| absent key | 109 table reads | 0.95 data blocks per get (0.88% FP rate, theory 0.82%) |
+| present key | ~55 table reads (half, on average) | 1.49 table probes per get |
+
+The 0.49 extra probes per present key is exactly the false-positive rate
+times the ~55 newer tables checked first. More tables means more false
+positives, which is one reason compaction exists (phase 5).
+
+**Range scans** use a k-way merge (`src/iter.rs`) over one cursor per layer,
+using a min-heap keyed by `(key, source index)`, with sources ordered newest
+first. For equal keys the newest source wins, and the cursors for that key
+in older sources are advanced past it. Tombstones win the same way but
+aren't returned. I checked that inverting the tie-break breaks the model
+tests. Cost: O(log k) per step for k sources.
+
+* **Snapshot semantics.** `Db::iter` holds `Arc`s to the immutable memtable
+  and the SSTable list, so later flushes don't disturb it. The *active*
+  memtable keeps only the newest version per key, so a later overwrite
+  would destroy the version the iterator should see. The iterator therefore
+  **copies the in-range part of the active memtable** at creation (bounded by
+  `memtable_size`). **Rejected:** a multi-version memtable with
+  sequence-number snapshots (RocksDB's approach). It is the right fix for
+  cheap snapshots and huge memtables, but needs MVCC throughout and garbage
+  collection of old versions.
+* The immutable memtable never changes, so its cursor just re-seeks past the
+  current key on each step (O(log n)). That avoids a self-referential borrow
+  of a `BTreeMap` iterator.
+* SSTables whose key range doesn't overlap the scan bounds are skipped
+  without being opened. Bloom filters can't help with ranges.
+* The iterator is lazy: one data block per SSTable cursor is in memory at a
+  time. A read or checksum error is returned once as `Err` and the iterator
+  then ends, so it can never silently skip data.
+* `Db::scan` is now `iter(..).collect()`.
+
+**Not done: a block cache.** Every data-block read is a `pread` plus a
+checksum, served from the OS page cache when the data is hot. A user-space
+LRU cache would save the syscall and the CRC on hot blocks. Whether that
+matters is a phase 7 measurement, not a guess.
+
+**Counters** (`Db::stats()`): gets, memtable hits, range skips, Bloom skips,
+probes, false positives, scan range skips, data blocks read. These feed the
+phase 7 benchmarks.
+
+## 8. Placeholders for later phases
+
 * Manifest format and atomic replacement (phase 4)
 * Compaction strategy: size-tiered vs. leveled (phase 5)

@@ -2,8 +2,9 @@
 //! merge tree.
 //!
 //! Done so far: the write-ahead log, the memtable, crash recovery (phase 1),
-//! and the SSTable format with background flushing (phase 2). Bloom-filtered
-//! reads, the manifest and compaction come in later phases.
+//! the SSTable format with background flushing (phase 2), and the read path
+//! with Bloom filters and a streaming merge iterator (phase 3). The manifest
+//! and compaction come in later phases.
 //!
 //! # Durability contract
 //!
@@ -30,6 +31,7 @@ mod error;
 pub mod filename;
 mod fsutil;
 mod hash;
+mod iter;
 pub mod memtable;
 mod options;
 pub mod sstable;
@@ -38,6 +40,7 @@ pub mod wal;
 #[cfg(test)]
 mod testutil;
 
-pub use db::{Db, RecoveryReport, MAX_KEY_LEN, MAX_VALUE_LEN};
+pub use db::{Db, ReadStats, RecoveryReport, MAX_KEY_LEN, MAX_VALUE_LEN};
+pub use iter::DbIter;
 pub use error::{Error, Result};
 pub use options::{Options, SyncPolicy, WalRecoveryMode};
