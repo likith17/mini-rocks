@@ -1,0 +1,158 @@
+﻿# n=1000000 reads=200000 scans=20000 sync_n=5000 key=16B value=100B reps=3
+  rep 0 minirocks fillseq.ops_per_sec            351723.3653524699
+  rep 0 minirocks fillseq.settle_sec             0.0793122
+  rep 0 minirocks fillseq.write_amp              4.21632923275862
+  rep 0 minirocks fillseq.internal_write_amp     4.216318767241379
+  rep 0 minirocks fillrandom.ops_per_sec         305819.56278812024
+  rep 0 minirocks fillrandom.settle_sec          0.0845221
+  rep 0 minirocks fillrandom.write_amp           3.9696413103448274
+  rep 0 minirocks fillrandom.internal_write_amp  3.969630974137931
+  rep 0 minirocks fillrandom.tables_after_settle 3
+  rep 0 minirocks fillrandom.compactions         12
+  rep 0 minirocks fillrandom.unique_keys         631869
+  rep 0 minirocks space_amp.before_compaction    1.2229410712095987
+  rep 0 minirocks readrandom.ops_per_sec         238130.1071466417
+  rep 0 minirocks readrandom.hit_rate            0.631905
+  rep 0 minirocks readrandom.sst_probes_per_get  0.647605
+  rep 0 minirocks readrandom.data_blocks_per_get 0.647605
+  rep 0 minirocks readrandom.tables_checked_per_get 2.545645
+  rep 0 minirocks readmissing.ops_per_sec        2134544.616251569
+  rep 0 minirocks seekrandom.scans_per_sec       24824.586369638837
+  rep 0 minirocks seekrandom.items_per_sec       2482389.1281220485
+  rep 0 minirocks scanall.items_per_sec          4312036.419694533
+  rep 0 minirocks seekhot.scans_per_sec          663.7516155963231
+  rep 0 minirocks compact.sec                    0.3220823
+  rep 0 minirocks space_amp.after_compaction     0.9647089530820369
+  rep 0 minirocks fillsync.ops_per_sec           12012.762358729915
+  rep 0 minirocks done in 39.3 s
+  rep 0 sled      fillseq.ops_per_sec            320603.92546163924
+  rep 0 sled      fillseq.settle_sec             0.0002518
+  rep 0 sled      fillseq.write_amp              8.756361025862068
+  rep 0 sled      fillrandom.ops_per_sec         174023.36824073875
+  rep 0 sled      fillrandom.settle_sec          0.0008665
+  rep 0 sled      fillrandom.write_amp           4.0304389224137935
+  rep 0 sled      fillrandom.unique_keys         631869
+  rep 0 sled      space_amp.before_compaction    3.447720285321035
+  rep 0 sled      readrandom.ops_per_sec         404773.821495959
+  rep 0 sled      readrandom.hit_rate            0.631905
+  rep 0 sled      readmissing.ops_per_sec        688930.1328395082
+  rep 0 sled      seekrandom.scans_per_sec       26697.48624478765
+  rep 0 sled      seekrandom.items_per_sec       2669673.8715172797
+  rep 0 sled      scanall.items_per_sec          2868251.8556716004
+  rep 0 sled      seekhot.scans_per_sec          24835.28925723486
+  rep 0 sled      fillsync.ops_per_sec           9464.160077560686
+  rep 0 sled done in 12.5 s
+  rep 1 minirocks fillseq.ops_per_sec            335484.77482865786
+  rep 1 minirocks fillseq.settle_sec             0.0776781
+  rep 1 minirocks fillseq.write_amp              4.21632924137931
+  rep 1 minirocks fillseq.internal_write_amp     4.216318767241379
+  rep 1 minirocks fillrandom.ops_per_sec         284193.3074920148
+  rep 1 minirocks fillrandom.settle_sec          0.0896156
+  rep 1 minirocks fillrandom.write_amp           3.969641301724138
+  rep 1 minirocks fillrandom.internal_write_amp  3.969630974137931
+  rep 1 minirocks fillrandom.tables_after_settle 3
+  rep 1 minirocks fillrandom.compactions         12
+  rep 1 minirocks fillrandom.unique_keys         631869
+  rep 1 minirocks space_amp.before_compaction    1.2229410712095987
+  rep 1 minirocks readrandom.ops_per_sec         225046.80973642517
+  rep 1 minirocks readrandom.hit_rate            0.631905
+  rep 1 minirocks readrandom.sst_probes_per_get  0.647605
+  rep 1 minirocks readrandom.data_blocks_per_get 0.647605
+  rep 1 minirocks readrandom.tables_checked_per_get 2.545645
+  rep 1 minirocks readmissing.ops_per_sec        2122741.1380864335
+  rep 1 minirocks seekrandom.scans_per_sec       22921.64042387156
+  rep 1 minirocks seekrandom.items_per_sec       2292099.8617939693
+  rep 1 minirocks scanall.items_per_sec          4084875.7151630735
+  rep 1 minirocks seekhot.scans_per_sec          645.468672915408
+  rep 1 minirocks compact.sec                    0.309257
+  rep 1 minirocks space_amp.after_compaction     0.9647089530820369
+  rep 1 minirocks fillsync.ops_per_sec           11266.305724274742
+  rep 1 minirocks done in 40.7 s
+  rep 1 sled      fillseq.ops_per_sec            312798.90868214343
+  rep 1 sled      fillseq.settle_sec             0.0003207
+  rep 1 sled      fillseq.write_amp              8.760925189655172
+  rep 1 sled      fillrandom.ops_per_sec         174061.02865124602
+  rep 1 sled      fillrandom.settle_sec          0.0008388
+  rep 1 sled      fillrandom.write_amp           4.004023413793104
+  rep 1 sled      fillrandom.unique_keys         631869
+  rep 1 sled      space_amp.before_compaction    3.439850665248651
+  rep 1 sled      readrandom.ops_per_sec         414977.7073975586
+  rep 1 sled      readrandom.hit_rate            0.631905
+  rep 1 sled      readmissing.ops_per_sec        702931.6114320579
+  rep 1 sled      seekrandom.scans_per_sec       26355.739225773807
+  rep 1 sled      seekrandom.items_per_sec       2635500.1265075486
+  rep 1 sled      scanall.items_per_sec          2837603.344754959
+  rep 1 sled      seekhot.scans_per_sec          25381.019870292836
+  rep 1 sled      fillsync.ops_per_sec           9585.839950598416
+  rep 1 sled done in 12.6 s
+  rep 2 minirocks fillseq.ops_per_sec            340567.8689949839
+  rep 2 minirocks fillseq.settle_sec             0.084134
+  rep 2 minirocks fillseq.write_amp              4.216329224137931
+  rep 2 minirocks fillseq.internal_write_amp     4.216318767241379
+  rep 2 minirocks fillrandom.ops_per_sec         293626.36696654046
+  rep 2 minirocks fillrandom.settle_sec          0.0859696
+  rep 2 minirocks fillrandom.write_amp           3.9696413103448274
+  rep 2 minirocks fillrandom.internal_write_amp  3.969630974137931
+  rep 2 minirocks fillrandom.tables_after_settle 3
+  rep 2 minirocks fillrandom.compactions         12
+  rep 2 minirocks fillrandom.unique_keys         631869
+  rep 2 minirocks space_amp.before_compaction    1.2229410712095987
+  rep 2 minirocks readrandom.ops_per_sec         230917.7375188097
+  rep 2 minirocks readrandom.hit_rate            0.631905
+  rep 2 minirocks readrandom.sst_probes_per_get  0.647605
+  rep 2 minirocks readrandom.data_blocks_per_get 0.647605
+  rep 2 minirocks readrandom.tables_checked_per_get 2.545645
+  rep 2 minirocks readmissing.ops_per_sec        2190978.8636269025
+  rep 2 minirocks seekrandom.scans_per_sec       23976.822085626267
+  rep 2 minirocks seekrandom.items_per_sec       2397615.073460787
+  rep 2 minirocks scanall.items_per_sec          4047111.22383884
+  rep 2 minirocks seekhot.scans_per_sec          665.3564179762764
+  rep 2 minirocks compact.sec                    0.317369
+  rep 2 minirocks space_amp.after_compaction     0.9647089530820369
+  rep 2 minirocks fillsync.ops_per_sec           11238.099133969605
+  rep 2 minirocks done in 39.5 s
+  rep 2 sled      fillseq.ops_per_sec            281536.1920968737
+  rep 2 sled      fillseq.settle_sec             0.0004371
+  rep 2 sled      fillseq.write_amp              8.758212362068965
+  rep 2 sled      fillrandom.ops_per_sec         169937.51057861003
+  rep 2 sled      fillrandom.settle_sec          0.0002762
+  rep 2 sled      fillrandom.write_amp           4.019279112068966
+  rep 2 sled      fillrandom.unique_keys         631869
+  rep 2 sled      space_amp.before_compaction    3.45487323021615
+  rep 2 sled      readrandom.ops_per_sec         412703.5944213204
+  rep 2 sled      readrandom.hit_rate            0.631905
+  rep 2 sled      readmissing.ops_per_sec        687286.6404535541
+  rep 2 sled      seekrandom.scans_per_sec       27160.88983964075
+  rep 2 sled      seekrandom.items_per_sec       2716012.933472524
+  rep 2 sled      scanall.items_per_sec          2897070.326290587
+  rep 2 sled      seekhot.scans_per_sec          25519.27904974371
+  rep 2 sled      fillsync.ops_per_sec           8044.406410490936
+  rep 2 sled done in 13.2 s
+
+| metric | minirocks | sled |
+|---|---|---|
+| fillseq.ops_per_sec | 340568 (335485–351723) | 312799 (281536–320604) |
+| fillseq.settle_sec | 0.08 (0.08–0.08) | 0.00 (0.00–0.00) |
+| fillseq.write_amp | 4.22 (4.22–4.22) | 8.76 (8.76–8.76) |
+| fillseq.internal_write_amp | 4.22 (4.22–4.22) | n/a |
+| fillrandom.ops_per_sec | 293626 (284193–305820) | 174023 (169938–174061) |
+| fillrandom.settle_sec | 0.09 (0.08–0.09) | 0.00 (0.00–0.00) |
+| fillrandom.write_amp | 3.97 (3.97–3.97) | 4.02 (4.00–4.03) |
+| fillrandom.internal_write_amp | 3.97 (3.97–3.97) | n/a |
+| fillrandom.tables_after_settle | 3.00 (3.00–3.00) | n/a |
+| fillrandom.compactions | 12.0 (12.0–12.0) | n/a |
+| fillrandom.unique_keys | 631869 (631869–631869) | 631869 (631869–631869) |
+| space_amp.before_compaction | 1.22 (1.22–1.22) | 3.45 (3.44–3.45) |
+| readrandom.ops_per_sec | 230918 (225047–238130) | 412704 (404774–414978) |
+| readrandom.hit_rate | 0.63 (0.63–0.63) | 0.63 (0.63–0.63) |
+| readrandom.sst_probes_per_get | 0.65 (0.65–0.65) | n/a |
+| readrandom.data_blocks_per_get | 0.65 (0.65–0.65) | n/a |
+| readrandom.tables_checked_per_get | 2.55 (2.55–2.55) | n/a |
+| readmissing.ops_per_sec | 2134545 (2122741–2190979) | 688930 (687287–702932) |
+| seekrandom.scans_per_sec | 23977 (22922–24825) | 26697 (26356–27161) |
+| seekrandom.items_per_sec | 2397615 (2292100–2482389) | 2669674 (2635500–2716013) |
+| scanall.items_per_sec | 4084876 (4047111–4312036) | 2868252 (2837603–2897070) |
+| seekhot.scans_per_sec | 663.8 (645.5–665.4) | 25381 (24835–25519) |
+| compact.sec | 0.32 (0.31–0.32) | n/a |
+| space_amp.after_compaction | 0.96 (0.96–0.96) | n/a |
+| fillsync.ops_per_sec | 11266 (11238–12013) | 9464 (8044–9586) |

@@ -11,6 +11,136 @@ system temp directory on the same SSD.
 
 ---
 
+## Benchmarks: MiniRocks vs sled (phase 7)
+
+### Setup
+
+* **Baseline: sled 0.34.7**, defaults: a 1 GiB in-memory page cache, and a
+  background flush and fsync every 500 ms. **RocksDB was the first choice
+  but doesn't build on this machine.** `rust-rocksdb` needs libclang (for
+  `bindgen`) and a C++ toolchain, and neither is installed. See DECISIONS.md
+  §11.
+* **MiniRocks: defaults** (4 MiB memtable, 4 KiB blocks, 10-bit Bloom
+  filters, size-tiered compaction: min 4, max 32, ratio 3). For the
+  non-fsync workloads it uses `SyncPolicy::Never`. For `fillsync` it uses
+  `SyncPolicy::Always`, and sled calls `flush()` after every insert.
+* **Data:** 16-byte keys and 100-byte pseudo-random (incompressible) values,
+  so 116 user bytes per entry. N = 1,000,000. 200,000 point reads; 20,000
+  scans of 100 items; 5,000 fsynced writes.
+* **Method:** each engine runs 3 times, each run in a **fresh process** on a
+  fresh directory, alternating engines. Cells show the median, with the
+  range across the 3 runs in brackets.
+* **Bytes written** come from the OS's per-process I/O counters
+  (`GetProcessIoCounters` → `WriteTransferCount`: bytes passed to write
+  calls). That measures both engines the same way. For MiniRocks, the
+  engine's own counters (`WriteStats`) agree to the last digit.
+* The whole dataset (~116 MB) fits in RAM, so **reads never touch the
+  device**: these are in-memory read numbers for both engines.
+* To reproduce:
+  `cargo run --release -p minirocks-bench -- all --n 1000000 --reps 3`.
+  Raw output: `experiments/bench-1m.log`.
+
+### Results (median of 3, range in brackets)
+
+| Workload | MiniRocks | sled | MiniRocks vs sled |
+|---|---|---|---|
+| fillseq, ops/s | 340,568 (335,485–351,723) | 312,799 (281,536–320,604) | **1.09× faster** |
+| fillrandom, ops/s | 293,626 (284,193–305,820) | 174,023 (169,938–174,061) | **1.69× faster** |
+| fillsync (fsync per write), ops/s | 11,266 (11,238–12,013) | 9,464 (8,044–9,586) | **1.19× faster** |
+| readrandom (63% hits), ops/s | 230,918 (225,047–238,130) | 412,704 (404,774–414,978) | **1.79× slower** |
+| readmissing, ops/s | 2,134,545 (2,122,741–2,190,979) | 688,930 (687,287–702,932) | **3.10× faster** |
+| seekrandom (100 items), scans/s | 23,977 (22,922–24,825) | 26,697 (26,356–27,161) | **1.11× slower** |
+| scanall, items/s | 4,084,876 (4,047,111–4,312,036) | 2,868,252 (2,837,603–2,897,070) | **1.42× faster** |
+| seekhot (fresh data in memtable), scans/s | 664 (646–665) | 25,381 (24,835–25,519) | **38× slower** |
+| Write amp, fillseq | 4.22 | 8.76 | lower |
+| Write amp, fillrandom | 3.97 | 4.02 | about equal |
+| Space amp after fillrandom (before compaction) | 1.22 | 3.45 | lower |
+| Space amp after full compaction | 0.96 | n/a (sled has no compaction call) | |
+| Full compaction time | 0.32 s | n/a | |
+
+Write and space amplification are deterministic for MiniRocks (identical in
+all 3 runs). The definitions:
+* **Write amp:** bytes written to disk ÷ (N × 116 user bytes). Measured
+  after a settle (MiniRocks: flush plus pending compactions; sled:
+  `flush()`).
+* **Space amp:** directory size ÷ (live keys × 116 bytes). 631,869 of the 1M
+  random keys are unique.
+* **Space amp below 1.0** after compaction comes from prefix compression of
+  the 16-digit keys.
+
+MiniRocks internals during fillrandom: 12 compactions, 3 live tables after
+settling. During readrandom, a lookup checked 2.55 tables on average, made
+0.65 table probes and read 0.65 data blocks.
+
+### Where MiniRocks is slower, and why
+
+1. **Point reads of present keys: 1.79× slower.**
+   - **What the counters show:** probes per get (0.65) equal the hit rate
+     (0.63) plus Bloom false positives (0.02), so each lookup reads **at
+     most one data block**. The filters are doing their job.
+   - **Where the time goes:** a missing-key get (no block read) costs 1 /
+     2.13M = **0.47 µs**. The readrandom average is 1 / 231k = **4.33 µs**.
+     Taking out the misses' share leaves (4.33 − 0.37 × 0.47) / 0.65 ≈
+     **6.4 µs per data-block read**. That breaks down as a `pread`
+     syscall, a CRC32 over the ~4 KiB block, a fresh `Vec` allocation and a
+     block decode.
+   - **Why sled is faster here:** it answers from its own in-memory cache
+     with no syscall, in about 2.4 µs.
+   - **The fix** would be a block cache of decoded, already-verified blocks
+     (DECISIONS.md §7, "Not done"). Phase 3 deferred it to be measured, and
+     this is the measurement.
+2. **Scans with fresh data in the memtable: 38× slower.**
+   - **Cause:** this is the snapshot design from DECISIONS.md §7. Each
+     iterator copies the active memtable's part of its range. A scan from a
+     random key with no end bound copies everything from that key on, up to
+     4 MiB (~25,000 entries), to return 100 items. About 1.5 ms per scan.
+   - **Evidence it's the memtable:** the same scans after a flush
+     (`seekrandom`) run at 24k/s.
+   - **The fix:** a multi-version memtable (sequence-number snapshots), or
+     freezing the memtable on iterator creation.
+3. **Short scans after settling: 1.11× slower.** Each scan opens a cursor on
+   every overlapping table (3 here), reads one block from each, and merges
+   through a heap. Every block read pays the same costs as in item 1.
+
+### Where MiniRocks is faster, and the caveats
+
+* **Writes.**
+  - The likely reason for the fillrandom difference (1.69×), which I have
+    not profiled inside sled: sled updates its on-disk tree structure on
+    every insert, while an LSM only appends to a log and a memtable.
+  - **Caveat on durability:** with these settings, sled keeps acknowledged
+    writes in *its own* memory for up to 500 ms, so a process crash can lose
+    them. MiniRocks `SyncPolicy::Never` hands each record to the OS before
+    acknowledging it, so it survives a process crash (verified by the
+    phase 6 harness). Even so MiniRocks is faster, but the two configurations
+    don't promise the same thing.
+* **fillsync (fsync per write).** Both are bound by `FlushFileBuffers`, about
+  89 µs per call on this NVMe drive. MiniRocks writes one small record per
+  fsync. Neither engine batches concurrent writers (group commit), and only
+  one writer thread was used.
+* **Missing keys (3.10×).** The Bloom filters rule out every table without
+  reading a block.
+* **Full scans (1.42×).** Sequential block reads with prefix-compressed keys,
+  merged over just 3 tables.
+* **Space amplification (1.22 vs 3.45).** Size-tiered compaction had merged
+  most overwritten versions by the time the tree settled.
+* **Write amplification, fillseq (4.22 vs 8.76).** Even so, 4.22 is high
+  for *sequential* data. Size-tiered compaction rewrites non-overlapping
+  tables when it merges a tier, whereas leveled compaction would just *move*
+  such files to the next level ("trivial move"). That would leave only the
+  WAL (137 bytes on disk per 116 user bytes, 1.18×) and the flush (≈1.0×),
+  about 2.2 in total. This is a cost of the strategy, noted in DECISIONS.md
+  §9.
+
+### Run history
+
+| Log | Note |
+|---|---|
+| `experiments/bench-1m-run1-readrandom-all-hits.log` | First full run. **Flawed readrandom:** read keys came from `mix(i ^ 0x5A5A)` and fill keys from `mix(i ^ 0xA5A5)`. For i < 2²⁰, XOR with a constant only permutes the same inputs, so the hit rate was 1.00, not the intended 0.63. Its readrandom figures (152k vs 407k ops/s, 2.7×) measure present-key reads only. All other metrics match run 2 within noise. Not used in the table above. |
+| `experiments/bench-1m.log` | Run 2: independent read stream (hit rate 0.63), plus internal counters. **Used above.** |
+
+---
+
 ## Crash-consistency campaigns (phase 6)
 
 Harness design and limits: DECISIONS.md §10. To reproduce:

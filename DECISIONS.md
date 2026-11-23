@@ -632,6 +632,44 @@ garbage, is still corruption.
   which are injected. The OS doesn't produce these on a process kill.
 * Disk-full and I/O errors. The poisoning logic (§1) is not exercised.
 
-## 11. Placeholders for later phases
+## 11. Benchmarks (phase 7)
 
-* Benchmarks and comparison with RocksDB (phase 7)
+Results and analysis are in EXPERIMENTS.md. These are the decisions behind
+them.
+
+* **The baseline is sled, not RocksDB, for now.** The brief allows either.
+  `rust-rocksdb` compiles RocksDB's C++ and generates bindings with
+  `bindgen`, which needs libclang. This machine has the MSVC Rust toolchain
+  but no clang, libclang, CMake or C++ compiler on PATH. Installing LLVM is
+  a system change for the user to make. Once it is installed, adding
+  RocksDB is a second `Engine` implementation in `bench/src/main.rs`.
+  RocksDB is the more informative comparison: same architecture, and
+  universal compaction is its size-tiered mode.
+* **A separate `bench` crate** in the workspace, so baseline engines never
+  become dependencies of MiniRocks. The library still depends only on
+  `crc32fast`.
+* **Each engine in a fresh process, 3 repetitions, median with range.**
+  Separate processes stop caches, allocator state and per-process I/O
+  counters from leaking between engines.
+* **Bytes written are measured by the OS** (per-process write-byte
+  counters), not by asking each engine, so both engines are measured the
+  same way. MiniRocks' own `WriteStats` serve as a cross-check, and agree
+  exactly. These are bytes handed to write calls, not device-level writes
+  after the OS coalesces them. Both engines see the same treatment.
+* **Default settings for both engines.** The comparison is "as shipped".
+  The one exception is that MiniRocks uses `SyncPolicy::Never` for the
+  non-fsync workloads, to roughly match sled's background flushing. The two
+  still differ in durability (sled can lose up to 500 ms of acknowledged
+  writes on a process crash; MiniRocks loses none), and EXPERIMENTS.md says
+  so next to the write numbers.
+* **The benchmark checks correctness as it goes.** Every `readrandom` result
+  is compared with the value last written, missing keys must miss, and a
+  full scan must return exactly the live key count. A fast wrong answer
+  would fail the run.
+* **The dataset fits in RAM**, so these are CPU and syscall benchmarks, not
+  device benchmarks. A larger-than-RAM run would mostly measure the SSD and
+  each engine's caching policy. That is left for later.
+
+## 12. Placeholders for later phases
+
+* README with architecture diagram and results (phase 8)

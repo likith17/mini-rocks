@@ -22,3 +22,11 @@ failpoints = []
 name = "crashtest"
 path = "src/bin/crashtest.rs"
 required-features = ["failpoints"]
+
+# Benchmarks live in their own crate so baseline engines never become
+# dependencies of the library.
+[workspace]
+members = ["bench"]
+
+[profile.release]
+debug = 1 # line tables, for profiling benchmark runs; no effect on speed

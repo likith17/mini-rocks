@@ -1,0 +1,130 @@
+﻿# n=1000000 reads=200000 scans=20000 sync_n=5000 key=16B value=100B reps=3
+  rep 0 minirocks fillseq.ops_per_sec            339899.3619171248
+  rep 0 minirocks fillseq.settle_sec             0.0799142
+  rep 0 minirocks fillseq.write_amp              4.21632923275862
+  rep 0 minirocks fillrandom.ops_per_sec         286490.56053711707
+  rep 0 minirocks fillrandom.settle_sec          0.0832654
+  rep 0 minirocks fillrandom.write_amp           3.9696413103448274
+  rep 0 minirocks fillrandom.unique_keys         631869
+  rep 0 minirocks space_amp.before_compaction    1.2229410712095987
+  rep 0 minirocks readrandom.ops_per_sec         152153.29627183345
+  rep 0 minirocks readrandom.hit_rate            1
+  rep 0 minirocks readmissing.ops_per_sec        2160713.8998725177
+  rep 0 minirocks seekrandom.scans_per_sec       23214.8316773807
+  rep 0 minirocks seekrandom.items_per_sec       2321418.166209373
+  rep 0 minirocks scanall.items_per_sec          3872835.5585302487
+  rep 0 minirocks seekhot.scans_per_sec          630.957066785083
+  rep 0 minirocks compact.sec                    0.3195335
+  rep 0 minirocks space_amp.after_compaction     0.9647089530820369
+  rep 0 minirocks fillsync.ops_per_sec           11832.04833344416
+  rep 0 minirocks done in 41.7 s
+  rep 0 sled      fillseq.ops_per_sec            330488.39012462355
+  rep 0 sled      fillseq.settle_sec             0.0004653
+  rep 0 sled      fillseq.write_amp              8.757884137931034
+  rep 0 sled      fillrandom.ops_per_sec         178723.3945205981
+  rep 0 sled      fillrandom.settle_sec          0.0006044
+  rep 0 sled      fillrandom.write_amp           4.026656663793103
+  rep 0 sled      fillrandom.unique_keys         631869
+  rep 0 sled      space_amp.before_compaction    3.5335556240624078
+  rep 0 sled      readrandom.ops_per_sec         421469.5759025613
+  rep 0 sled      readrandom.hit_rate            1
+  rep 0 sled      readmissing.ops_per_sec        712286.7324487207
+  rep 0 sled      seekrandom.scans_per_sec       26392.894927114045
+  rep 0 sled      seekrandom.items_per_sec       2639215.5926056085
+  rep 0 sled      scanall.items_per_sec          2835158.770398754
+  rep 0 sled      seekhot.scans_per_sec          24688.419797940096
+  rep 0 sled      fillsync.ops_per_sec           9190.37569152982
+  rep 0 sled done in 12.3 s
+  rep 1 minirocks fillseq.ops_per_sec            348520.20585973293
+  rep 1 minirocks fillseq.settle_sec             0.0775812
+  rep 1 minirocks fillseq.write_amp              4.21632924137931
+  rep 1 minirocks fillrandom.ops_per_sec         306946.8895322087
+  rep 1 minirocks fillrandom.settle_sec          0.0820298
+  rep 1 minirocks fillrandom.write_amp           3.969641301724138
+  rep 1 minirocks fillrandom.unique_keys         631869
+  rep 1 minirocks space_amp.before_compaction    1.2229410712095987
+  rep 1 minirocks readrandom.ops_per_sec         158078.56140921346
+  rep 1 minirocks readrandom.hit_rate            1
+  rep 1 minirocks readmissing.ops_per_sec        2264010.8310278156
+  rep 1 minirocks seekrandom.scans_per_sec       23475.586387869036
+  rep 1 minirocks seekrandom.items_per_sec       2347492.9071450178
+  rep 1 minirocks scanall.items_per_sec          3959786.0520205675
+  rep 1 minirocks seekhot.scans_per_sec          619.2616103524762
+  rep 1 minirocks compact.sec                    0.3241708
+  rep 1 minirocks space_amp.after_compaction     0.9647089530820369
+  rep 1 minirocks fillsync.ops_per_sec           11393.978009166683
+  rep 1 minirocks done in 42.0 s
+  rep 1 sled      fillseq.ops_per_sec            306941.66061147506
+  rep 1 sled      fillseq.settle_sec             0.0003744
+  rep 1 sled      fillseq.write_amp              8.760943534482758
+  rep 1 sled      fillrandom.ops_per_sec         173752.07653278566
+  rep 1 sled      fillrandom.settle_sec          0.0009076
+  rep 1 sled      fillrandom.write_amp           4.044026810344827
+  rep 1 sled      fillrandom.unique_keys         631869
+  rep 1 sled      space_amp.before_compaction    3.440567340425921
+  rep 1 sled      readrandom.ops_per_sec         383159.08535328414
+  rep 1 sled      readrandom.hit_rate            1
+  rep 1 sled      readmissing.ops_per_sec        681177.5652806519
+  rep 1 sled      seekrandom.scans_per_sec       26557.250793397867
+  rep 1 sled      seekrandom.items_per_sec       2655650.719037565
+  rep 1 sled      scanall.items_per_sec          2923167.668244209
+  rep 1 sled      seekhot.scans_per_sec          25015.77557347102
+  rep 1 sled      fillsync.ops_per_sec           8306.753107847075
+  rep 1 sled done in 12.9 s
+  rep 2 minirocks fillseq.ops_per_sec            339065.27705057693
+  rep 2 minirocks fillseq.settle_sec             0.0805524
+  rep 2 minirocks fillseq.write_amp              4.21632924137931
+  rep 2 minirocks fillrandom.ops_per_sec         290618.2443972726
+  rep 2 minirocks fillrandom.settle_sec          0.08284
+  rep 2 minirocks fillrandom.write_amp           3.9696412844827584
+  rep 2 minirocks fillrandom.unique_keys         631869
+  rep 2 minirocks space_amp.before_compaction    1.2229410712095987
+  rep 2 minirocks readrandom.ops_per_sec         149875.65940606524
+  rep 2 minirocks readrandom.hit_rate            1
+  rep 2 minirocks readmissing.ops_per_sec        2095217.1430666647
+  rep 2 minirocks seekrandom.scans_per_sec       23988.50087222189
+  rep 2 minirocks seekrandom.items_per_sec       2398782.919419747
+  rep 2 minirocks scanall.items_per_sec          4149312.988728865
+  rep 2 minirocks seekhot.scans_per_sec          610.4152585721935
+  rep 2 minirocks compact.sec                    0.3149525
+  rep 2 minirocks space_amp.after_compaction     0.9647089530820369
+  rep 2 minirocks fillsync.ops_per_sec           11614.132075909967
+  rep 2 minirocks done in 42.7 s
+  rep 2 sled      fillseq.ops_per_sec            314379.0633100959
+  rep 2 sled      fillseq.settle_sec             0.0005755
+  rep 2 sled      fillseq.write_amp              8.762166413793103
+  rep 2 sled      fillrandom.ops_per_sec         173926.615803915
+  rep 2 sled      fillrandom.settle_sec          0.0006351
+  rep 2 sled      fillrandom.write_amp           4.017248974137931
+  rep 2 sled      fillrandom.unique_keys         631869
+  rep 2 sled      space_amp.before_compaction    3.4906379546917217
+  rep 2 sled      readrandom.ops_per_sec         407416.86098753364
+  rep 2 sled      readrandom.hit_rate            1
+  rep 2 sled      readmissing.ops_per_sec        646294.3903262655
+  rep 2 sled      seekrandom.scans_per_sec       27184.029491409914
+  rep 2 sled      seekrandom.items_per_sec       2718326.8338584155
+  rep 2 sled      scanall.items_per_sec          2920830.0205240096
+  rep 2 sled      seekhot.scans_per_sec          25812.06365513018
+  rep 2 sled      fillsync.ops_per_sec           8539.416494839375
+  rep 2 sled done in 12.6 s
+
+| metric | minirocks | sled |
+|---|---|---|
+| fillseq.ops_per_sec | 339899 (339065–348520) | 314379 (306942–330488) |
+| fillseq.settle_sec | 0.08 (0.08–0.08) | 0.00 (0.00–0.00) |
+| fillseq.write_amp | 4.22 (4.22–4.22) | 8.76 (8.76–8.76) |
+| fillrandom.ops_per_sec | 290618 (286491–306947) | 173927 (173752–178723) |
+| fillrandom.settle_sec | 0.08 (0.08–0.08) | 0.00 (0.00–0.00) |
+| fillrandom.write_amp | 3.97 (3.97–3.97) | 4.03 (4.02–4.04) |
+| fillrandom.unique_keys | 631869 (631869–631869) | 631869 (631869–631869) |
+| space_amp.before_compaction | 1.22 (1.22–1.22) | 3.49 (3.44–3.53) |
+| readrandom.ops_per_sec | 152153 (149876–158079) | 407417 (383159–421470) |
+| readrandom.hit_rate | 1.00 (1.00–1.00) | 1.00 (1.00–1.00) |
+| readmissing.ops_per_sec | 2160714 (2095217–2264011) | 681178 (646294–712287) |
+| seekrandom.scans_per_sec | 23476 (23215–23989) | 26557 (26393–27184) |
+| seekrandom.items_per_sec | 2347493 (2321418–2398783) | 2655651 (2639216–2718327) |
+| scanall.items_per_sec | 3959786 (3872836–4149313) | 2920830 (2835159–2923168) |
+| seekhot.scans_per_sec | 619.3 (610.4–631.0) | 25016 (24688–25812) |
+| compact.sec | 0.32 (0.31–0.32) | n/a |
+| space_amp.after_compaction | 0.96 (0.96–0.96) | n/a |
+| fillsync.ops_per_sec | 11614 (11394–11832) | 8539 (8307–9190) |
