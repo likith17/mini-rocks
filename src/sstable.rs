@@ -196,6 +196,7 @@ impl SstWriter {
         }
         let contents = self.data_block.finish();
         let handle = self.write_block(&contents)?;
+        crate::crashpoint::point("sst.write_block");
         let mut encoded = Vec::new();
         handle.encode_to(&mut encoded);
         self.index_block.add(&self.last_key, 0, &encoded);
@@ -281,8 +282,10 @@ pub fn build_table_with(
     })();
     match result {
         Ok(meta) => {
+            crate::crashpoint::point("sst.before_rename");
             fs::rename(&tmp, dir.join(filename::sst_file_name(number)))?;
             fsutil::sync_dir(dir)?;
+            crate::crashpoint::point("sst.after_rename");
             Ok(meta)
         }
         Err(e) => {

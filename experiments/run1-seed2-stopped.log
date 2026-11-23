@@ -1,0 +1,3 @@
+crashtest: seed 2 cycles 600 threads 1 keys/thread 300 dir C:\Users\pliki\AppData\Local\Temp\minirocks-crashtest-2
+  cycle    50: 1103475 ops applied in total, 1103451 acked verified, 15 crash points fired, 65 s
+  cycle   100: 2033623 ops applied in total, 2033575 acked verified, 24 crash points fired, 143 s

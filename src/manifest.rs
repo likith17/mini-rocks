@@ -222,9 +222,8 @@ pub fn read_manifest(path: &Path) -> Result<ManifestContents> {
             }
         }
     }
-    if edits == 0 {
-        return Err(corrupt("no valid edits".into()));
-    }
+    // `edits == 0` means the file is empty or holds only a torn first edit:
+    // its creation was interrupted. The caller decides what that means.
     Ok(ManifestContents { state, edits, torn_bytes: (data.len() - off) as u64 })
 }
 
@@ -244,6 +243,7 @@ impl ManifestWriter {
         file.write_all(&frame(&state.snapshot()))?;
         file.sync_all()?;
         fsutil::sync_dir(dir)?;
+        crate::crashpoint::point("manifest.create.before_current");
         set_current(dir, number)?;
         Ok(ManifestWriter { file, number, poisoned: false })
     }
@@ -258,9 +258,14 @@ impl ManifestWriter {
         if self.poisoned {
             return Err(Error::Poisoned("an earlier manifest write failed".into()));
         }
+        let framed = frame(edit);
+        if crate::crashpoint::torn("manifest.append.torn") {
+            let _ = self.file.write_all(&framed[..framed.len() / 2]);
+            crate::crashpoint::die("manifest.append.torn");
+        }
         // As with the WAL, after a failed write or fsync the file's state
         // is unknown, so refuse all further edits.
-        let result = self.file.write_all(&frame(edit)).and_then(|_| self.file.sync_data());
+        let result = self.file.write_all(&framed).and_then(|_| self.file.sync_data());
         if let Err(e) = result {
             self.poisoned = true;
             return Err(Error::Io(e));
@@ -276,6 +281,7 @@ pub fn set_current(dir: &Path, number: u64) -> Result<()> {
     writeln!(f, "{}", filename::manifest_file_name(number))?;
     f.sync_all()?;
     drop(f);
+    crate::crashpoint::point("current.before_rename");
     fs::rename(&tmp, dir.join(filename::CURRENT))?;
     fsutil::sync_dir(dir)?;
     Ok(())

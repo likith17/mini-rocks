@@ -4,8 +4,10 @@
 //! Done so far: the write-ahead log, the memtable, crash recovery (phase 1),
 //! the SSTable format with background flushing (phase 2), the read path
 //! with Bloom filters and a streaming merge iterator (phase 3), the
-//! manifest that records which SSTables are live (phase 4), and size-tiered
-//! background compaction (phase 5).
+//! manifest that records which SSTables are live (phase 4), size-tiered
+//! background compaction (phase 5), and named crash points for the
+//! crash-consistency harness `src/bin/crashtest.rs` (phase 6, behind the
+//! `failpoints` feature).
 //!
 //! # Durability contract
 //!
@@ -28,6 +30,7 @@ mod block;
 mod bloom;
 mod coding;
 mod compaction;
+mod crashpoint;
 mod db;
 mod error;
 pub mod filename;

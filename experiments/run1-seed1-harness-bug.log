@@ -1,0 +1,7 @@
+crashtest: seed 1 cycles 1000 threads 4 keys/thread 3000 dir C:\Users\pliki\AppData\Local\Temp\minirocks-crashtest-1
+  cycle    50: 397962 ops applied in total, 397934 acked verified, 12 crash points fired, 45 s
+  cycle   100: 659870 ops applied in total, 659812 acked verified, 25 crash points fired, 90 s
+thread 'main' panicked at src\bin\crashtest.rs:311:47:
+called `Option::unwrap()` on a `None` value
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+exit 101

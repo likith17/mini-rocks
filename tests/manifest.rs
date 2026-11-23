@@ -244,13 +244,10 @@ fn every_truncation_of_the_manifest_tail_edit_recovers() {
 }
 
 #[test]
-fn missing_or_bad_current_is_corruption() {
+fn bad_current_is_corruption() {
     let dir = TempDir::new("mf-current");
     populate(dir.path(), 100);
     let current = fs::read(dir.path().join(CURRENT)).unwrap();
-
-    fs::remove_file(dir.path().join(CURRENT)).unwrap();
-    assert!(matches!(Db::open(dir.path(), small()), Err(Error::Corruption(_))));
 
     fs::write(dir.path().join(CURRENT), "MANIFEST-424242\n").unwrap();
     assert!(matches!(Db::open(dir.path(), small()), Err(Error::Corruption(_))));
@@ -260,6 +257,43 @@ fn missing_or_bad_current_is_corruption() {
 
     fs::write(dir.path().join(CURRENT), current).unwrap();
     Db::open(dir.path(), small()).unwrap();
+}
+
+/// Regression test for crash-harness failure #1 (EXPERIMENTS.md): a crash
+/// after the first manifest was written but before CURRENT was created made
+/// every later open fail with "manifest files exist but CURRENT is missing".
+#[test]
+fn crash_before_first_current_does_not_brick_the_database() {
+    // Variant A: the first manifest is complete (the crash hit just before
+    // CURRENT was written). It describes the state, so use it.
+    let dir = TempDir::new("mf-first-current");
+    let model = populate(dir.path(), 300);
+    fs::remove_file(dir.path().join(CURRENT)).unwrap();
+    let db = Db::open(dir.path(), small()).unwrap();
+    assert!(db.recovery_report().recovered_without_current.is_some());
+    assert_eq!(contents(&db), model);
+    drop(db);
+    assert!(read_current(dir.path()).unwrap().is_some(), "CURRENT recreated");
+
+    // Variant B: the very first open was killed while its manifest was
+    // being written, after the WAL had been replayed into nothing: a torn
+    // manifest, no CURRENT, and data only in the WAL.
+    let dir = TempDir::new("mf-first-torn");
+    let mut model = BTreeMap::new();
+    {
+        let mut w = minirocks::wal::WalWriter::open(&dir.path().join(wal_file_name(1)), SyncPolicy::Always).unwrap();
+        for i in 0..20u64 {
+            let (k, v) = (format!("k{i:02}").into_bytes(), b"v".to_vec());
+            w.append(minirocks::wal::RecordRef::Put { seq: i + 1, key: &k, value: &v }).unwrap();
+            model.insert(k, v);
+        }
+    }
+    fs::write(dir.path().join(manifest_file_name(2)), [7u8, 0, 0]).unwrap();
+    let db = Db::open(dir.path(), small()).unwrap();
+    assert_eq!(db.recovery_report().recovered_without_current, None);
+    assert_eq!(contents(&db), model);
+    drop(db);
+    assert_eq!(files(dir.path(), FileKind::Manifest).len(), 1, "torn manifest cleaned up");
 }
 
 #[test]

@@ -38,6 +38,9 @@ pub struct RecoveryReport {
     /// SSTables adopted from a directory without a manifest (one created by
     /// phase 2/3 code).
     pub ssts_adopted_without_manifest: usize,
+    /// `CURRENT` was missing (a crash interrupted its first creation), so
+    /// this manifest, the newest valid one, was used instead.
+    pub recovered_without_current: Option<u64>,
     pub wal_files_replayed: usize,
     /// WAL records applied to the memtable.
     pub records_replayed: u64,
@@ -251,6 +254,8 @@ impl Db {
         wal_numbers.sort_unstable();
 
         // 2. The manifest decides which SSTables are live.
+        manifest_numbers.sort_unstable();
+        let mut recovered_without_current = None;
         let mut state = match manifest::read_current(&dir)? {
             Some(n) => {
                 let path = dir.join(filename::manifest_file_name(n));
@@ -258,26 +263,45 @@ impl Db {
                     return Err(Error::Corruption(format!("CURRENT names {}, which does not exist", path.display())));
                 }
                 let contents = manifest::read_manifest(&path)?;
+                if contents.edits == 0 {
+                    return Err(Error::Corruption(format!("{}: no valid edits", path.display())));
+                }
                 report.manifest_edits_replayed = contents.edits;
                 report.manifest_torn_bytes = contents.torn_bytes;
                 contents.state
             }
+            // CURRENT is only ever replaced by an atomic rename, never
+            // deleted, so manifests without CURRENT mean a crash interrupted
+            // the first switch to CURRENT. Found by the crash harness: this
+            // used to be reported as corruption, which bricked a database
+            // whose first open was killed. Use the newest manifest that
+            // reads back validly: any newer one is a complete snapshot of
+            // the same state, or torn.
             None if !manifest_numbers.is_empty() => {
-                return Err(Error::Corruption(
-                    "manifest files exist but CURRENT is missing; refusing to guess which is live".into(),
-                ));
-            }
-            None => {
-                // A new database, or one written before the manifest existed
-                // (phases 2-3), where every SSTable present was live.
-                let mut s = ManifestState::default();
-                for &n in &sst_numbers {
-                    s.files.insert(n, fs::metadata(dir.join(filename::sst_file_name(n)))?.len());
+                let mut found = None;
+                for &n in manifest_numbers.iter().rev() {
+                    let contents = manifest::read_manifest(&dir.join(filename::manifest_file_name(n)))?;
+                    if contents.edits > 0 {
+                        found = Some((n, contents));
+                        break;
+                    }
                 }
-                report.ssts_adopted_without_manifest = sst_numbers.len();
-                s
+                match found {
+                    Some((n, contents)) => {
+                        recovered_without_current = Some(n);
+                        report.manifest_edits_replayed = contents.edits;
+                        report.manifest_torn_bytes = contents.torn_bytes;
+                        contents.state
+                    }
+                    // Not even one complete manifest: the very first one was
+                    // torn. No flush can have run without CURRENT, so every
+                    // SSTable present predates it and is live.
+                    None => adopt_all(&dir, &sst_numbers, &mut report)?,
+                }
             }
+            None => adopt_all(&dir, &sst_numbers, &mut report)?,
         };
+        report.recovered_without_current = recovered_without_current;
 
         // 3. SSTables the manifest doesn't list were never committed (a
         //    flush crashed before its manifest edit), or were already
@@ -286,6 +310,7 @@ impl Db {
             if !state.files.contains_key(&n) {
                 fs::remove_file(dir.join(filename::sst_file_name(n)))?;
                 report.orphan_ssts_removed += 1;
+                crate::crashpoint::point("recovery.after_orphan_delete");
             }
         }
 
@@ -376,6 +401,7 @@ impl Db {
                 // Cut the invalid tail so new records are appended directly
                 // after the last valid one, where recovery will find them.
                 wal::truncate(&path, contents.valid_len)?;
+                crate::crashpoint::point("recovery.after_wal_truncate");
                 report.bytes_discarded += contents.file_len - contents.valid_len;
                 report.discard_reason = Some(format!(
                     "{}: {reason} at offset {}",
@@ -435,6 +461,7 @@ impl Db {
         next_file_number += 1;
         state.next_file_number = next_file_number;
         let manifest = ManifestWriter::create(&dir, manifest_number, &state)?;
+        crate::crashpoint::point("recovery.before_old_manifest_delete");
         for &n in &manifest_numbers {
             fs::remove_file(dir.join(filename::manifest_file_name(n)))?;
         }
@@ -752,6 +779,7 @@ impl Inner {
         let sst_number = wal_number + 1;
         let new_wal = WalWriter::open(&self.dir.join(wal::wal_file_name(wal_number)), self.options.sync)?;
         w.next_file_number += 2;
+        crate::crashpoint::point("rotate.after_new_wal");
         w.wal = new_wal;
         let wals = std::mem::replace(&mut w.mem_wals, vec![wal_number]);
         {
@@ -804,7 +832,9 @@ impl Inner {
                 added: vec![(imm.sst_number, table.meta().file_size)],
                 deleted: Vec::new(),
             };
+            crate::crashpoint::point("flush.before_manifest");
             self.manifest.lock().unwrap_or_else(|e| e.into_inner()).append(&edit)?;
+            crate::crashpoint::point("flush.after_manifest");
             Ok(table)
         });
 
@@ -823,6 +853,7 @@ impl Inner {
                 // The SSTable is committed and installed, so the WALs are
                 // redundant. If a crash hits before this, recovery deletes
                 // them by log number. Failure to delete is harmless.
+                crate::crashpoint::point("flush.before_wal_delete");
                 for &n in &imm.wals {
                     let _ = fs::remove_file(self.dir.join(wal::wal_file_name(n)));
                 }
@@ -932,7 +963,9 @@ impl Inner {
             deleted: input_numbers.clone(),
             ..VersionEdit::default()
         };
+        crate::crashpoint::point("compaction.before_manifest");
         self.manifest.lock().unwrap_or_else(|e| e.into_inner()).append(&edit)?;
+        crate::crashpoint::point("compaction.after_manifest");
 
         {
             // Flushes may have added newer tables meanwhile; keep them.
@@ -945,6 +978,7 @@ impl Inner {
         }
         // Readers and iterators holding an input keep it alive; the file goes
         // when the last reference does.
+        crate::crashpoint::point("compaction.before_obsolete");
         for t in &inputs {
             t.mark_obsolete();
         }
@@ -1000,6 +1034,18 @@ fn validate(o: &Options) -> Result<()> {
         return bad("compaction_size_ratio must be >= 1.0");
     }
     Ok(())
+}
+
+/// State for a directory with no usable manifest: a new database, one
+/// written before the manifest existed (phases 2-3), or one whose first
+/// manifest was torn. In all three, every SSTable present is live.
+fn adopt_all(dir: &Path, sst_numbers: &[u64], report: &mut RecoveryReport) -> Result<ManifestState> {
+    let mut s = ManifestState::default();
+    for &n in sst_numbers {
+        s.files.insert(n, fs::metadata(dir.join(filename::sst_file_name(n)))?.len());
+    }
+    report.ssts_adopted_without_manifest = sst_numbers.len();
+    Ok(s)
 }
 
 fn check_key(key: &[u8]) -> Result<()> {

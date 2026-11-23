@@ -12,3 +12,13 @@ publish = false
 # its only transitive dependency is `cfg-if`. A hand-rolled table CRC would
 # work, but checksumming sits on the hot write path, so speed matters.
 crc32fast = "1.4"
+
+[features]
+# Named crash points for the crash-consistency harness (src/crashpoint.rs).
+# Off by default; compiled to nothing without it.
+failpoints = []
+
+[[bin]]
+name = "crashtest"
+path = "src/bin/crashtest.rs"
+required-features = ["failpoints"]

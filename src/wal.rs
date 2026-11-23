@@ -280,6 +280,10 @@ impl WalWriter {
         self.check_poisoned()?;
         self.buf.clear();
         encode(rec, &mut self.buf);
+        if crate::crashpoint::torn("wal.append.torn") {
+            let _ = self.file.write_all(&self.buf[..self.buf.len() / 2]);
+            crate::crashpoint::die("wal.append.torn");
+        }
         // One write call per record, no user-space buffering: once this
         // returns, the record is in the OS page cache and survives a crash of
         // this process.

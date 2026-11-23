@@ -378,8 +378,9 @@ and the contents are exact.
 
 **Recovery is manifest-driven:**
 
-* No `CURRENT` but `MANIFEST-*` files exist → corruption. We don't guess
-  which manifest is live.
+* ~~No `CURRENT` but `MANIFEST-*` files exist → corruption.~~ **Changed in
+  phase 6** after the crash harness showed it bricks a database whose first
+  open is killed. See §10.
 * `CURRENT` names a missing file, or holds garbage → corruption.
 * A torn final edit → ignored (it was never committed). An invalid edit
   followed by a valid one → corruption. This is the same resync rule as the
@@ -530,7 +531,107 @@ Measurements from the tests; phase 7 will do this properly at scale:
   large file, and needs that much free space temporarily.
 * No compaction rate limiting, so it competes freely with foreground I/O.
 
-## 10. Placeholders for later phases
+## 10. Crash-consistency harness (phase 6)
 
-* Crash-consistency harness (phase 6)
+`src/bin/crashtest.rs`, run with
+`cargo run --release --features failpoints --bin crashtest -- --cycles N --seed S`.
+Results are in EXPERIMENTS.md.
+
+### What it checks
+
+The property under test is the durability contract from §1. After any
+crash, recovery must produce exactly the state after **all acknowledged
+writes**, optionally plus the **one write per thread that was in flight**.
+Nothing older may be lost, nothing un-written may appear, and no value may
+be corrupted. Reads must not fail. The one exception is a test that damages
+an SSTable on purpose; there, every read must either return correct data or
+fail with `Corruption`.
+
+### Design choices
+
+* **Real processes, real kills.** The writer is a child process, killed with
+  `TerminateProcess` (Windows) or `SIGKILL`. In-process simulation would
+  miss what matters, such as buffered data in user space or background
+  threads dying mid-operation.
+* **Acknowledgement over a pipe.** Each writer thread prints `A <thread>
+  <index>` after a call returns `Ok`. Lines already in the pipe when the
+  child dies were acknowledged before it died, so the driver reads them all.
+* **A deterministic workload, so the model needs no communication.**
+  Operation *i* of thread *t* is a pure function of (seed, t, i): 80% puts
+  and 20% deletes over a hot/cold key distribution, with values of 5–170
+  bytes tagged with `t:i`. The driver replays the same operations into an
+  in-memory model. Threads use disjoint key prefixes, so each thread's state
+  is checked on its own, which keeps the "plus one in flight" rule exact
+  under concurrency.
+* **Three kill methods per cycle:**
+  1. after a random number of ACKs (up to 20,000);
+  2. after a random delay, half of them under 60 ms, so they land in process
+     start-up or inside `open()`, that is, *during recovery*;
+  3. by arming a **named crash point** in the engine (`src/crashpoint.rs`,
+     compiled in only with the `failpoints` feature).
+
+  Random kills alone almost never land in a window a few microseconds wide,
+  such as between an SSTable rename and its manifest commit. Crash points
+  hit each window on purpose. A point exits via `process::exit`: no
+  destructors run and nothing is synced, so for file state it is the same as
+  `kill -9`. Points cover:
+  - torn WAL and manifest writes (half the record written);
+  - WAL rotation;
+  - every step of a flush and of a compaction;
+  - `CURRENT` replacement;
+  - three steps of recovery itself.
+* **Verify on a copy; leave the original crashed.** The driver copies the
+  directory and recovers the copy. The original stays exactly as the crash
+  left it, so the *next* child must recover it, and may be killed while
+  doing so. That gives crash-during-recovery coverage for free.
+* **Fault injection between cycles (25% of cycles):**
+  - Destroying recent WAL bytes. **WAL tail truncation** (1–120 bytes) and a
+    **bit flip in the last 64 bytes of the WAL** lose acknowledged writes on
+    purpose. For these the driver accepts the state after any per-thread
+    *prefix* that ends at most ⌈bytes/21⌉+2 operations early. That checks
+    that damage loses only a suffix and never corrupts or reorders. A flip
+    the default recovery mode refuses (a damaged record followed by a valid
+    one) is recovered with `PointInTime`, as an operator would.
+  - Harmless damage. **Garbage appended** to the WAL tail and a **partial
+    `.sst.tmp`** must change nothing.
+  - Damaged SSTables. **SSTable truncation** and an **SSTable bit flip** at
+    a random byte are applied to a probe copy. They must be detected (at
+    open or on the read that touches them), and no read may return wrong
+    data. "Undetected" counts as a failure.
+* **Every cycle also checks point reads.** Point reads must agree with scans,
+  since Bloom filters, key-range checks and the merge iterator are separate
+  code paths.
+* **Sync policy and memtable size vary per cycle:** `Never` 70% of the time
+  (fast, and process crashes don't depend on fsync), `Always` 20%,
+  `EveryN(8)` 10%, with memtables of 4 KiB, 16 KiB or 64 KiB. Small
+  memtables mean frequent flushes and compactions.
+
+### What it found
+
+One engine bug: a crash between writing the first manifest and creating
+`CURRENT` left the database unopenable. That is now fixed and §8's rule for a
+missing `CURRENT` has changed. It also found one harness bug (a cut-off ACK
+line). Details in EXPERIMENTS.md.
+
+**Changed rule, superseding §8:** a missing `CURRENT` alongside manifest
+files is recovered, not refused. MiniRocks never deletes `CURRENT`, so the
+only way to get there is a crash during its first creation. Recovery uses the
+newest manifest that reads back validly. If none is valid (the first one was
+torn), it adopts the SSTables on disk, which is safe because no flush runs
+before `CURRENT` exists. A `CURRENT` that names a missing file, or holds
+garbage, is still corruption.
+
+### What it cannot check
+
+* **Power loss and OS crashes.** A process kill leaves the OS page cache
+  intact, so this harness cannot tell whether fsyncs are in the right places.
+  That would need a filesystem-level fault injector (dm-flakey or
+  CrashMonkey-style block-device recording) or VM snapshots. The fsync
+  placement is argued in §1, §6, §8 and §9, and is not yet tested.
+* Torn writes *within* a single `write()` call, as opposed to torn records,
+  which are injected. The OS doesn't produce these on a process kill.
+* Disk-full and I/O errors. The poisoning logic (§1) is not exercised.
+
+## 11. Placeholders for later phases
+
 * Benchmarks and comparison with RocksDB (phase 7)

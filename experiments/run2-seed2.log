@@ -1,0 +1,50 @@
+crashtest: seed 2 cycles 600 threads 1 keys/thread 300 dir C:\Users\pliki\AppData\Local\Temp\minirocks-crashtest-2
+  cycle    50: 1232488 ops applied in total, 1232470 acked verified, 14 crash points fired, 86 s
+  cycle   100: 2301314 ops applied in total, 2301270 acked verified, 22 crash points fired, 164 s
+  cycle   150: 3473089 ops applied in total, 3473029 acked verified, 35 crash points fired, 257 s
+  cycle   200: 3990331 ops applied in total, 3990247 acked verified, 44 crash points fired, 308 s
+  cycle   250: 5200968 ops applied in total, 5200866 acked verified, 50 crash points fired, 423 s
+  cycle   300: 6006773 ops applied in total, 6006649 acked verified, 58 crash points fired, 484 s
+  cycle   350: 7497922 ops applied in total, 7497777 acked verified, 68 crash points fired, 555 s
+  cycle   400: 8937688 ops applied in total, 8937519 acked verified, 78 crash points fired, 635 s
+  cycle   450: 10230061 ops applied in total, 10229868 acked verified, 89 crash points fired, 730 s
+  cycle   500: 11816674 ops applied in total, 11816461 acked verified, 101 crash points fired, 828 s
+  cycle   550: 12456201 ops applied in total, 12455971 acked verified, 109 crash points fired, 870 s
+  cycle   600: 13189265 ops applied in total, 13189009 acked verified, 120 crash points fired, 906 s
+--- crashtest report after 600 cycles (906 s) ---
+kills after N acks:            226
+kills after random delay:      184 (39 before the child finished opening)
+crash points fired:            120 (armed but not reached, then killed: 70)
+    compaction.after_manifest              5
+    compaction.before_manifest             6
+    compaction.before_obsolete             6
+    current.before_rename                  10
+    flush.after_manifest                   10
+    flush.before_manifest                  6
+    flush.before_wal_delete                7
+    manifest.append.torn                   10
+    manifest.create.before_current         10
+    recovery.after_orphan_delete           3
+    recovery.after_wal_truncate            1
+    recovery.before_old_manifest_delete    12
+    rotate.after_new_wal                   3
+    sst.after_rename                       4
+    sst.before_rename                      6
+    sst.write_block                        9
+    wal.append.torn                        12
+faults injected:               145
+    SstFlip                                21
+    SstTruncate                            25
+    TempSst                                28
+    WalGarbage                             33
+    WalTailFlip                            21
+    WalTruncate                            17
+  corrupt SSTables detected at open: 26, at read: 20 (skipped, no live SSTable yet: 0)
+  PointInTime recoveries after mid-log WAL damage: 4
+acknowledged ops verified:     13189009
+  in-flight op found applied: 270, absent: 316
+  acked ops lost ONLY to injected WAL damage (allowed): 14
+key comparisons:               173401
+max live SSTables seen:        9
+RESULT: PASS (600 cycles, 0 failures)
+exit 0

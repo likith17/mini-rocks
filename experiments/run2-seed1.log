@@ -1,0 +1,58 @@
+crashtest: seed 1 cycles 1000 threads 4 keys/thread 3000 dir C:\Users\pliki\AppData\Local\Temp\minirocks-crashtest-1
+  cycle    50: 246878 ops applied in total, 246846 acked verified, 13 crash points fired, 41 s
+  cycle   100: 507742 ops applied in total, 507672 acked verified, 26 crash points fired, 87 s
+  cycle   150: 868228 ops applied in total, 868123 acked verified, 41 crash points fired, 115 s
+  cycle   200: 1213108 ops applied in total, 1212966 acked verified, 54 crash points fired, 170 s
+  cycle   250: 1389326 ops applied in total, 1389157 acked verified, 72 crash points fired, 201 s
+  cycle   300: 1599806 ops applied in total, 1599599 acked verified, 83 crash points fired, 234 s
+  cycle   350: 1940641 ops applied in total, 1940408 acked verified, 93 crash points fired, 280 s
+  cycle   400: 2161572 ops applied in total, 2161309 acked verified, 108 crash points fired, 320 s
+  cycle   450: 2788951 ops applied in total, 2788657 acked verified, 118 crash points fired, 384 s
+  cycle   500: 2956467 ops applied in total, 2956144 acked verified, 134 crash points fired, 402 s
+  cycle   550: 3365526 ops applied in total, 3365159 acked verified, 150 crash points fired, 459 s
+  cycle   600: 3724693 ops applied in total, 3724292 acked verified, 166 crash points fired, 509 s
+  cycle   650: 4053683 ops applied in total, 4053243 acked verified, 175 crash points fired, 567 s
+  cycle   700: 4274745 ops applied in total, 4274278 acked verified, 187 crash points fired, 602 s
+  cycle   750: 4536066 ops applied in total, 4535576 acked verified, 201 crash points fired, 650 s
+  cycle   800: 4951348 ops applied in total, 4950821 acked verified, 216 crash points fired, 722 s
+  cycle   850: 5581305 ops applied in total, 5580736 acked verified, 230 crash points fired, 784 s
+  cycle   900: 6014380 ops applied in total, 6013780 acked verified, 239 crash points fired, 839 s
+  cycle   950: 6248500 ops applied in total, 6247877 acked verified, 251 crash points fired, 890 s
+  cycle  1000: 6454172 ops applied in total, 6453526 acked verified, 268 crash points fired, 938 s
+--- crashtest report after 1000 cycles (938 s) ---
+kills after N acks:            393
+kills after random delay:      321 (37 before the child finished opening)
+crash points fired:            268 (armed but not reached, then killed: 18)
+    compaction.after_manifest              15
+    compaction.before_manifest             19
+    compaction.before_obsolete             14
+    current.before_rename                  22
+    flush.after_manifest                   21
+    flush.before_manifest                  14
+    flush.before_wal_delete                7
+    manifest.append.torn                   17
+    manifest.create.before_current         20
+    recovery.after_orphan_delete           7
+    recovery.after_wal_truncate            2
+    recovery.before_old_manifest_delete    17
+    rotate.after_new_wal                   15
+    sst.after_rename                       13
+    sst.before_rename                      20
+    sst.write_block                        24
+    wal.append.torn                        21
+faults injected:               255
+    SstFlip                                46
+    SstTruncate                            39
+    TempSst                                43
+    WalGarbage                             46
+    WalTailFlip                            37
+    WalTruncate                            44
+  corrupt SSTables detected at open: 40, at read: 44 (skipped, no live SSTable yet: 1)
+  PointInTime recoveries after mid-log WAL damage: 3
+acknowledged ops verified:     6453526
+  in-flight op found applied: 686, absent: 3275
+  acked ops lost ONLY to injected WAL damage (allowed): 40
+key comparisons:               9715478
+max live SSTables seen:        33
+RESULT: PASS (1000 cycles, 0 failures)
+exit 0
