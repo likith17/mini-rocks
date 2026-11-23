@@ -9,6 +9,36 @@
 //! crash-consistency harness `src/bin/crashtest.rs` (phase 6, behind the
 //! `failpoints` feature).
 //!
+//! # Example
+//!
+//! ```
+//! use std::ops::Bound::{Included, Unbounded};
+//! use minirocks::{Db, Options, SyncPolicy};
+//!
+//! # let dir = std::env::temp_dir().join(format!("minirocks-doctest-{}", std::process::id()));
+//! # let _ = std::fs::remove_dir_all(&dir);
+//! let db = Db::open(&dir, Options { sync: SyncPolicy::Always, ..Options::default() })?;
+//! db.put(b"apple", b"red")?;
+//! db.put(b"banana", b"yellow")?;
+//! db.put(b"cherry", b"dark red")?;
+//! db.delete(b"banana")?;
+//!
+//! assert_eq!(db.get(b"apple")?, Some(b"red".to_vec()));
+//! assert_eq!(db.get(b"banana")?, None);
+//!
+//! // Range scan: every live key >= "b", in order.
+//! let rest: Vec<_> = db.iter(Included(b"b".as_slice()), Unbounded)?.collect::<Result<_, _>>()?;
+//! assert_eq!(rest, vec![(b"cherry".to_vec(), b"dark red".to_vec())]);
+//!
+//! // Reopening replays the WAL: acknowledged writes are still there.
+//! drop(db);
+//! let db = Db::open(&dir, Options::default())?;
+//! assert_eq!(db.get(b"cherry")?, Some(b"dark red".to_vec()));
+//! # drop(db);
+//! # std::fs::remove_dir_all(&dir).unwrap();
+//! # Ok::<(), minirocks::Error>(())
+//! ```
+//!
 //! # Durability contract
 //!
 //! A write is *acknowledged* when `put`/`delete` returns `Ok(())`. What an

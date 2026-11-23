@@ -1,7 +1,23 @@
 # Design decisions
 
 Each entry records what was chosen, what was rejected, and why. Sections
-are added phase by phase.
+were added phase by phase. Where a later phase changed an earlier decision,
+the earlier section says so and points forward.
+
+| § | Topic | Short answer |
+|---|---|---|
+| [1](#1-durability-contract-and-fsync-policy-phase-1) | Durability, fsync policy | `Always` / `EveryN` / `Never`; every policy survives a process crash; failed I/O poisons writes |
+| [2](#2-wal-record-format-phase-1) | WAL format | one CRC-framed record per write, CRC covers the length |
+| [3](#3-crash-recovery-phase-1) | WAL recovery | discard a torn tail; refuse mid-log damage unless `PointInTime` |
+| [4](#4-memtable-data-structure-phase-1) | Memtable | `BTreeMap` behind an `RwLock`, not a skip list |
+| [5](#5-sstable-format-phase-2) | SSTable format | prefix-compressed blocks, whole-file Bloom filter, index by last key, 64-byte footer |
+| [6](#6-flush-protocol-and-its-crash-points-phase-2) | Flush | background thread, one immutable memtable, write stall |
+| [7](#7-read-path-phase-3) | Read path | key-range then Bloom checks; heap merge iterator; snapshot by copying the memtable range |
+| [8](#8-manifest-phase-4) | Manifest | log of version edits plus atomic `CURRENT`; the commit point for flush and compaction |
+| [9](#9-compaction-phase-5) | Compaction | size-tiered over age-adjacent runs; tombstones dropped only at the bottom |
+| [10](#10-crash-consistency-harness-phase-6) | Crash harness | real processes, ACK pipe, deterministic model, 17 crash points, fault injection |
+| [11](#11-benchmarks-phase-7) | Benchmarks | sled baseline; fresh process per run; OS-measured write bytes |
+| [12](#12-what-i-would-do-next) | Next steps | block cache, MVCC memtable, power-loss testing, lock file, ... |
 
 ---
 
@@ -670,6 +686,22 @@ them.
   device benchmarks. A larger-than-RAM run would mostly measure the SSD and
   each engine's caching policy. That is left for later.
 
-## 12. Placeholders for later phases
+## 12. What I would do next
 
-* README with architecture diagram and results (phase 8)
+These are listed in order of what the measurements say would help most.
+None of them is started.
+
+1. **A block cache** of decoded, checksum-verified blocks. This is the main
+   cause of the 1.79× point-read gap against sled (§11, EXPERIMENTS.md).
+2. **Snapshot iterators without copying**, via a multi-version memtable
+   keyed by (key, seq). This fixes the 38× `seekhot` gap and would also give
+   a snapshots API.
+3. **Power-loss testing** with a block-device fault injector (dm-flakey,
+   or recording and replaying writes as CrashMonkey does) on Linux, to test
+   the fsync placement that the process-kill harness cannot.
+4. **A lock file**, so two processes can't open the same directory.
+5. **Group commit**, so concurrent writers share one fsync under `Always`.
+6. **RocksDB as a benchmark baseline**, once LLVM and a C++ toolchain are
+   available, run with both leveled and universal (size-tiered) compaction.
+7. **Leveled compaction as an option**, to compare amplification on the same
+   code base, including trivial moves for sequential loads.
