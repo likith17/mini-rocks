@@ -21,6 +21,7 @@
 //! | 2   | next file number  | varint                         |
 //! | 3   | add SSTable       | varint number, varint file size |
 //! | 4   | delete SSTable    | varint number                  |
+//! | 5   | last sequence     | varint: highest sequence number in any SSTable |
 //!
 //! An unknown tag is corruption: older code must never misread a newer
 //! format.
@@ -42,6 +43,7 @@ const TAG_LOG_NUMBER: u64 = 1;
 const TAG_NEXT_FILE: u64 = 2;
 const TAG_ADD_FILE: u64 = 3;
 const TAG_DELETE_FILE: u64 = 4;
+const TAG_LAST_SEQUENCE: u64 = 5;
 
 /// One atomic change to the set of live files.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -49,6 +51,10 @@ pub struct VersionEdit {
     /// WALs numbered below this hold only flushed data.
     pub log_number: Option<u64>,
     pub next_file_number: Option<u64>,
+    /// Highest sequence number ever flushed. Needed because compaction can
+    /// drop the newest entries (tombstones), so the tables alone may
+    /// under-report it.
+    pub last_sequence: Option<u64>,
     /// (SSTable number, file size in bytes).
     pub added: Vec<(u64, u64)>,
     pub deleted: Vec<u64>,
@@ -63,6 +69,10 @@ impl VersionEdit {
         }
         if let Some(n) = self.next_file_number {
             put_varint64(&mut buf, TAG_NEXT_FILE);
+            put_varint64(&mut buf, n);
+        }
+        if let Some(n) = self.last_sequence {
+            put_varint64(&mut buf, TAG_LAST_SEQUENCE);
             put_varint64(&mut buf, n);
         }
         for &(n, size) in &self.added {
@@ -84,6 +94,7 @@ impl VersionEdit {
             match r.varint64()? {
                 TAG_LOG_NUMBER => e.log_number = Some(r.varint64()?),
                 TAG_NEXT_FILE => e.next_file_number = Some(r.varint64()?),
+                TAG_LAST_SEQUENCE => e.last_sequence = Some(r.varint64()?),
                 TAG_ADD_FILE => e.added.push((r.varint64()?, r.varint64()?)),
                 TAG_DELETE_FILE => e.deleted.push(r.varint64()?),
                 _ => return None,
@@ -98,6 +109,7 @@ impl VersionEdit {
 pub struct ManifestState {
     pub log_number: u64,
     pub next_file_number: u64,
+    pub last_sequence: u64,
     /// Live SSTables: number -> file size.
     pub files: BTreeMap<u64, u64>,
 }
@@ -109,6 +121,9 @@ impl ManifestState {
         }
         if let Some(n) = edit.next_file_number {
             self.next_file_number = self.next_file_number.max(n);
+        }
+        if let Some(n) = edit.last_sequence {
+            self.last_sequence = self.last_sequence.max(n);
         }
         for &n in &edit.deleted {
             if self.files.remove(&n).is_none() {
@@ -129,6 +144,7 @@ impl ManifestState {
         VersionEdit {
             log_number: Some(self.log_number),
             next_file_number: Some(self.next_file_number),
+            last_sequence: Some(self.last_sequence),
             added: self.files.iter().map(|(&n, &s)| (n, s)).collect(),
             deleted: Vec::new(),
         }
@@ -289,6 +305,7 @@ mod tests {
         let e = VersionEdit {
             log_number: Some(7),
             next_file_number: Some(12),
+            last_sequence: Some(1 << 50),
             added: vec![(9, 4096), (11, 1 << 40)],
             deleted: vec![3, 5],
         };
@@ -310,7 +327,7 @@ mod tests {
 
     #[test]
     fn snapshot_recreates_state() {
-        let mut s = ManifestState { log_number: 3, next_file_number: 20, ..Default::default() };
+        let mut s = ManifestState { log_number: 3, next_file_number: 20, last_sequence: 77, ..Default::default() };
         s.files.insert(5, 100);
         s.files.insert(8, 200);
         let mut t = ManifestState::default();

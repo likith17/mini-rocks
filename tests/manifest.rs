@@ -57,10 +57,15 @@ fn manifest_tracks_every_flush_and_matches_the_directory() {
         db.put(format!("key{i:05}").as_bytes(), &[0u8; 20]).unwrap();
     }
     db.flush().unwrap();
+    // Close first: a background compaction may be swapping files, and
+    // closing waits for it (and releases the replaced tables' files).
+    drop(db);
     let state = read_manifest(&current_manifest(dir.path())).unwrap().state;
     let listed: Vec<u64> = state.files.keys().copied().collect();
     assert_eq!(listed, files(dir.path(), FileKind::Sst));
+    let db = Db::open(dir.path(), Options { auto_compaction: false, ..small() }).unwrap();
     assert_eq!(listed.len(), db.sst_count());
+    assert_eq!(db.recovery_report().orphan_ssts_removed, 0);
     for (&n, &size) in &state.files {
         assert_eq!(fs::metadata(dir.path().join(sst_file_name(n))).unwrap().len(), size);
     }
@@ -93,11 +98,13 @@ fn restart_cycles_preserve_data_and_keep_one_small_manifest() {
         drop(db);
         manifest_sizes.push(fs::metadata(current_manifest(dir.path())).unwrap().len());
     }
-    // Rewritten as a snapshot on every open: its size tracks the number of
-    // live tables (no compaction yet), not the number of restarts. One
-    // "add" entry is a few bytes.
-    let tables = files(dir.path(), FileKind::Sst).len() as u64;
-    assert!(*manifest_sizes.last().unwrap() < 64 + tables * 16, "{manifest_sizes:?}");
+    // Rewritten as a snapshot on every open, so its size reflects the live
+    // tables plus one session's edits, not the number of restarts. (With
+    // compaction the table count stays small too.)
+    assert!(manifest_sizes.iter().all(|&s| s < 400), "{manifest_sizes:?}");
+    let (first, last) = manifest_sizes.split_at(10);
+    let avg = |v: &[u64]| v.iter().sum::<u64>() as f64 / v.len() as f64;
+    assert!(avg(&last[10..]) < avg(first) * 2.0, "manifest grows with restarts: {manifest_sizes:?}");
 }
 
 /// Crash after the SSTable was written and renamed but before its manifest

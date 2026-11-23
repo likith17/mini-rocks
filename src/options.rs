@@ -45,6 +45,18 @@ pub struct Options {
     pub block_size: usize,
     /// Bloom filter bits per key (1..=64). Default 10, about 1% false positives.
     pub bloom_bits_per_key: usize,
+    /// Run size-tiered compaction in the background after each flush.
+    /// Default true. [`crate::Db::compact`] works either way.
+    pub auto_compaction: bool,
+    /// Merge a tier once it holds this many similar-sized SSTables (>= 2).
+    /// Default 4.
+    pub compaction_min_merge: usize,
+    /// Merge at most this many SSTables at once. Default 32.
+    pub compaction_max_merge: usize,
+    /// Tables are "similar" if the largest is at most this many times the
+    /// smallest (>= 1.0). Tables smaller than `memtable_size` count as
+    /// `memtable_size`. Default 3.0.
+    pub compaction_size_ratio: f64,
 }
 
 impl Default for Options {
@@ -55,6 +67,10 @@ impl Default for Options {
             memtable_size: 4 * 1024 * 1024,
             block_size: 4 * 1024,
             bloom_bits_per_key: 10,
+            auto_compaction: true,
+            compaction_min_merge: 4,
+            compaction_max_merge: 32,
+            compaction_size_ratio: 3.0,
         }
     }
 }

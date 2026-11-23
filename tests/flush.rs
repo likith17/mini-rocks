@@ -14,8 +14,10 @@ use minirocks::{Db, Error, Options, SyncPolicy};
 
 type Model = BTreeMap<Vec<u8>, Vec<u8>>;
 
+/// Auto-compaction off: these tests examine the layering that flushes build.
+/// Compaction has its own suite (tests/compaction.rs).
 fn small(memtable_size: usize) -> Options {
-    Options { memtable_size, block_size: 256, ..Options::default() }
+    Options { memtable_size, block_size: 256, auto_compaction: false, ..Options::default() }
 }
 
 fn files(dir: &Path, kind: FileKind) -> Vec<u64> {

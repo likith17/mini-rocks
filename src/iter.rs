@@ -81,21 +81,19 @@ impl Source {
     }
 }
 
-/// Iterator over live `(key, value)` pairs in ascending key order, from a
-/// snapshot taken when it was created. Yields `Err` once on a read or
-/// checksum error, then ends.
-pub struct DbIter {
+/// Merges sources into the newest entry per key, tombstones included. Used
+/// directly by compaction, and wrapped by [`DbIter`] for user scans.
+pub(crate) struct MergeIter {
     sources: Vec<Source>,
     heap: BinaryHeap<Reverse<(Vec<u8>, usize)>>,
     end: Bound<Vec<u8>>,
-    done: bool,
 }
 
-impl DbIter {
+impl MergeIter {
     /// `sources` must be ordered newest first and already positioned at the
     /// range start.
-    pub(crate) fn new(sources: Vec<Source>, end: Bound<Vec<u8>>) -> DbIter {
-        let mut it = DbIter { sources, heap: BinaryHeap::new(), end, done: false };
+    pub(crate) fn new(sources: Vec<Source>, end: Bound<Vec<u8>>) -> MergeIter {
+        let mut it = MergeIter { sources, heap: BinaryHeap::new(), end };
         for i in 0..it.sources.len() {
             it.push_if_in_range(i);
         }
@@ -115,13 +113,35 @@ impl DbIter {
         Ok(())
     }
 
+    /// The next key and its newest entry (possibly a tombstone).
+    pub(crate) fn next_entry(&mut self) -> Result<Option<(Vec<u8>, Entry)>> {
+        let Some(Reverse((key, i))) = self.heap.pop() else { return Ok(None) };
+        let entry = self.sources[i].entry()?;
+        self.advance(i)?;
+        // Older versions of the same key in other sources are shadowed.
+        while self.heap.peek().is_some_and(|Reverse((k, _))| *k == key) {
+            let Reverse((_, j)) = self.heap.pop().unwrap();
+            self.advance(j)?;
+        }
+        Ok(Some((key, entry)))
+    }
+}
+
+/// Iterator over live `(key, value)` pairs in ascending key order, from a
+/// snapshot taken when it was created. Yields `Err` once on a read or
+/// checksum error, then ends.
+pub struct DbIter {
+    merge: MergeIter,
+    done: bool,
+}
+
+impl DbIter {
+    pub(crate) fn new(sources: Vec<Source>, end: Bound<Vec<u8>>) -> DbIter {
+        DbIter { merge: MergeIter::new(sources, end), done: false }
+    }
+
     fn step(&mut self) -> Result<Option<(Vec<u8>, Vec<u8>)>> {
-        while let Some(Reverse((key, i))) = self.heap.pop() {            let entry = self.sources[i].entry()?;
-            self.advance(i)?;
-            // Older versions of the same key in other sources are shadowed.
-            while self.heap.peek().is_some_and(|Reverse((k, _))| *k == key) {
-                let Reverse((_, j)) = self.heap.pop().unwrap();                self.advance(j)?;
-            }
+        while let Some((key, entry)) = self.merge.next_entry()? {
             if let Some(value) = entry.value {
                 return Ok(Some((key, value)));
             }

@@ -415,6 +415,122 @@ must guarantee that.
 log numbers it shouldn't trigger (`records_already_flushed` is now 0 in the
 stale-WAL test), but it costs nothing and is sound.
 
-## 9. Placeholders for later phases
+## 9. Compaction (phase 5)
 
-* Compaction strategy: size-tiered vs. leveled (phase 5)
+### Strategy: size-tiered, and why not leveled (yet)
+
+Every flush adds a table, and every table a point lookup might have to check
+or a scan has to merge. Compaction merges tables to bound that count, drop
+overwritten values, and drop tombstones. The two classic strategies trade
+the three amplifications differently:
+
+| | Size-tiered (chosen) | Leveled (LevelDB/RocksDB default) |
+|---|---|---|
+| How | When ~4 similar-sized tables exist, merge them into one ~4× larger | Levels L1..Ln, each 10× the last, each split into non-overlapping key ranges. An overflowing level pushes one file's key range into the next level's overlapping files. |
+| **Write amp** | **Low**: each byte is rewritten about once per tier, ≈ log₄(N/memtable) times | **High**: each byte is rewritten about 10× per level (merged with ~10 overlapping files), ≈ 10 × levels |
+| **Read amp** (point) | Higher: tables in a tier overlap, so several per tier may be checked (Bloom filters absorb most of it) | Low: at most one table per level can hold a key |
+| **Space amp** | **High**: a key overwritten in every tier exists that many times, and a merge temporarily needs input + output space (up to 2× the largest tier) | Low: ~1.1× at steady state |
+| Scans | Merge every overlapping table | Merge one table per level |
+
+Size-tiered fits this project for three reasons:
+
+1. It is the write-optimised end of the trade-off, which is what an LSM is
+   for.
+2. It is far simpler. One output file and no per-level key-range bookkeeping
+   mean fewer places for a crash-consistency bug, which matters because the
+   crash harness is the centrepiece.
+3. Its weakness, space amplification, is exactly what the phase 7
+   benchmarks measure. Leveled compaction would be the next step if reads or
+   disk space dominated.
+
+### Policy (`src/compaction.rs`)
+
+* Tables are ordered by age (newest first). A **tier** is a maximal run of
+  age-adjacent tables whose largest is ≤ `compaction_size_ratio` (3.0) × the
+  smallest. Tables smaller than `memtable_size` count as `memtable_size`, so
+  fresh flushes group together despite small size differences.
+* A tier with ≥ `compaction_min_merge` (4) tables is merged, at most
+  `compaction_max_merge` (32) at a time. If several tiers qualify, the one
+  with the **fewest total bytes** goes first: it is the cheapest and cuts the
+  table count fastest.
+* **Only age-adjacent runs are merged.** That keeps the sequence ranges of
+  all tables disjoint, which is what lets the read path order tables by
+  `max_seq` (§8). A mutation test that orders by file number instead fails
+  the model tests.
+* **Tombstones are dropped only by a *bottommost* compaction**, one whose
+  run includes the oldest table. Otherwise an older table might still hold
+  the value the tombstone deletes, and dropping it would bring that value
+  back. A mutation test that drops tombstones too eagerly makes deleted
+  values resurface. Overwritten versions are always dropped, since there are
+  no snapshots or MVCC (§4).
+* `Db::compact()` is a manual major compaction: flush, merge everything, drop
+  all tombstones. `Db::run_pending_compactions()` runs the background policy
+  on the caller's thread, so tests and benchmarks can wait for the tree to
+  settle.
+
+### Running in the background
+
+A dedicated compaction thread, separate from the flush thread, so a long
+merge never delays a flush or stalls writers. Each successful flush (and
+each open) asks it to check. It merges until no tier is ready.
+`compaction_lock` is held from choosing the inputs to installing the output,
+so two compactions (background and manual) never pick the same tables. A
+flush can still add a newer table meanwhile: the installer filters out the
+inputs, adds the output, and re-sorts, and contiguity holds because the new
+table is newer than every input.
+
+On drop, a compaction already running finishes; none start after that. This
+can make closing the database slower. It is not cancellable yet.
+
+### Commit protocol (same shape as a flush, §8)
+
+1. Merge the inputs into `.sst.tmp`, fsync, rename, fsync the directory.
+2. Append `{add(output), delete(inputs…)}` to the manifest and fsync. **This is
+   the commit point.**
+3. Swap the tables for readers.
+4. Mark the inputs obsolete. Each input's file is deleted when its last
+   `Arc<SstReader>` drops, so an open iterator keeps reading its snapshot
+   and the file disappears when the iterator does (tested). A crash before
+   the deletion leaves the inputs as orphans, which recovery removes.
+
+| Crash between | On restart |
+|---|---|
+| 1 and 2 | The output is an orphan and deleted; the inputs are still live. |
+| 2 and 4 | The inputs are orphans and deleted; the output is live. |
+| inside 2 (torn edit) | Same as the first row. |
+
+A test cuts the manifest at **every byte** of the compaction edit with all
+five files present and checks the exact contents and orphan counts for
+each cut.
+
+**A new manifest field, `last_sequence`.** A major compaction can drop the
+newest entries (tombstones), so "max seq over all tables" can go backwards.
+The manifest now records the highest sequence number ever flushed, so a
+write after restart always gets a higher number. This has its own test.
+
+### Measured so far
+
+Measurements from the tests; phase 7 will do this properly at scale:
+
+* 40,000 random writes over 20,000 keys (29-byte entries, 8 KiB memtable):
+  373 flushes and about 120 compactions merging about 485 tables, leaving 5
+  tables. **Write amplification 6.69**: WAL 1.72× (the 21-byte record header
+  is large next to a 29-byte entry), flushes 1.17×, compaction 3.80×. The
+  compaction count varies slightly between runs, because background timing
+  decides which tables exist at each pick.
+* Ten overwrites of the same 2,000 keys: **space amplification 10.55 before
+  compaction and 1.06 after** a major compaction.
+
+### Not done
+
+* **No write stall on table count.** If compaction can't keep up, tables
+  pile up and reads slow down, but writes never block for it. (RocksDB slows
+  writes at ~20 L0 files and stops them at ~36.)
+* One output file per compaction: a full merge of a large tier produces one
+  large file, and needs that much free space temporarily.
+* No compaction rate limiting, so it competes freely with foreground I/O.
+
+## 10. Placeholders for later phases
+
+* Crash-consistency harness (phase 6)
+* Benchmarks and comparison with RocksDB (phase 7)

@@ -1,7 +1,7 @@
 use std::fs;
 use std::ops::Bound;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, RwLock, RwLockReadGuard, RwLockWriteGuard};
 use std::thread::JoinHandle;
@@ -9,7 +9,8 @@ use std::thread::JoinHandle;
 use crate::error::{Error, Result};
 use crate::filename::{self, FileKind};
 use crate::fsutil;
-use crate::iter::{DbIter, Source};
+use crate::compaction::pick_size_tiered;
+use crate::iter::{DbIter, MergeIter, Source};
 use crate::manifest::{self, ManifestState, ManifestWriter, VersionEdit};
 use crate::memtable::{is_empty_range, Lookup, MemTable};
 use crate::options::{Options, SyncPolicy, WalRecoveryMode};
@@ -103,6 +104,47 @@ fn bump(c: &AtomicU64) {
 pub struct Db {
     inner: Arc<Inner>,
     flusher: Option<JoinHandle<()>>,
+    compactor: Option<JoinHandle<()>>,
+}
+
+/// Bytes written since open. Write amplification is
+/// `(wal_bytes + flush_bytes + compaction_bytes_written) / user_bytes`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct WriteStats {
+    /// Key + value bytes passed to `put`/`delete`.
+    pub user_bytes: u64,
+    /// Bytes appended to WALs (record headers included).
+    pub wal_bytes: u64,
+    /// Bytes of SSTables written by flushes.
+    pub flush_bytes: u64,
+    /// Bytes of SSTables read as compaction input.
+    pub compaction_bytes_read: u64,
+    /// Bytes of SSTables written by compaction.
+    pub compaction_bytes_written: u64,
+    pub flushes: u64,
+    pub compactions: u64,
+    pub compaction_input_tables: u64,
+}
+
+impl WriteStats {
+    /// Total bytes written to disk divided by bytes written by the user
+    /// (WAL + flushes + compaction output). Excludes the manifest (tens of
+    /// bytes per flush) and filesystem metadata.
+    pub fn write_amplification(&self) -> f64 {
+        (self.wal_bytes + self.flush_bytes + self.compaction_bytes_written) as f64 / self.user_bytes.max(1) as f64
+    }
+}
+
+#[derive(Default)]
+struct IoCounters {
+    user_bytes: AtomicU64,
+    wal_bytes: AtomicU64,
+    flush_bytes: AtomicU64,
+    compaction_bytes_read: AtomicU64,
+    compaction_bytes_written: AtomicU64,
+    flushes: AtomicU64,
+    compactions: AtomicU64,
+    compaction_input_tables: AtomicU64,
 }
 
 struct Inner {
@@ -116,6 +158,13 @@ struct Inner {
     /// Set if a background flush fails. Writes then fail until reopen.
     bg_error: Mutex<Option<String>>,
     flush_tx: Sender<FlushMsg>,
+    compact_tx: Sender<CompactMsg>,
+    /// Held for a whole compaction, from choosing inputs to installing the
+    /// output, so two compactions never pick the same tables.
+    compaction_lock: Mutex<()>,
+    /// Set on drop: no new background compaction starts.
+    shutting_down: AtomicBool,
+    io: IoCounters,
     /// Appends version edits; locked by whoever changes the set of live
     /// SSTables (the flush thread, and the compaction thread later).
     manifest: Mutex<ManifestWriter>,
@@ -152,6 +201,11 @@ struct Immutable {
 
 enum FlushMsg {
     Flush,
+    Shutdown,
+}
+
+enum CompactMsg {
+    Compact,
     Shutdown,
 }
 
@@ -275,7 +329,7 @@ impl Db {
         //    above newer SSTables. (With the manifest's log number this
         //    should never trigger; it is kept as a second line of defence.)
         let mut mem = MemTable::new();
-        let mut max_seq = flushed_seq;
+        let mut max_seq = flushed_seq.max(state.last_sequence);
         let mut replayed: Vec<(u64, bool)> = Vec::new(); // (number, has unflushed records)
         for (i, &number) in wal_numbers.iter().enumerate() {
             let path = dir.join(wal::wal_file_name(number));
@@ -376,6 +430,7 @@ impl Db {
         //    the manifest from growing across restarts and drops any torn
         //    tail. A crash before the switch leaves the old CURRENT valid.
         state.log_number = *mem_wals.iter().min().unwrap();
+        state.last_sequence = max_seq;
         let manifest_number = next_file_number;
         next_file_number += 1;
         state.next_file_number = next_file_number;
@@ -388,6 +443,8 @@ impl Db {
         }
 
         let (flush_tx, flush_rx) = mpsc::channel();
+        let (compact_tx, compact_rx) = mpsc::channel();
+        let auto_compaction = options.auto_compaction;
         let inner = Arc::new(Inner {
             dir,
             options,
@@ -396,15 +453,27 @@ impl Db {
             state: RwLock::new(ReadState { mem, imm: None, ssts: Arc::new(ssts) }),
             bg_error: Mutex::new(None),
             flush_tx,
+            compact_tx,
+            compaction_lock: Mutex::new(()),
+            shutting_down: AtomicBool::new(false),
             manifest: Mutex::new(manifest),
             recovery: report,
             stats: StatCounters::default(),
+            io: IoCounters::default(),
         });
         let bg = Arc::clone(&inner);
         let flusher = std::thread::Builder::new()
             .name("minirocks-flush".into())
             .spawn(move || bg.flush_loop(flush_rx))?;
-        Ok(Db { inner, flusher: Some(flusher) })
+        let bg = Arc::clone(&inner);
+        let compactor = std::thread::Builder::new()
+            .name("minirocks-compact".into())
+            .spawn(move || bg.compaction_loop(compact_rx))?;
+        if auto_compaction {
+            // Recovered tables may already form a tier.
+            let _ = inner.compact_tx.send(CompactMsg::Compact);
+        }
+        Ok(Db { inner, flusher: Some(flusher), compactor: Some(compactor) })
     }
 
     /// Set `key` to `value`. Durable per the configured [`SyncPolicy`] once
@@ -564,13 +633,69 @@ impl Db {
     pub fn sst_count(&self) -> usize {
         self.inner.state_read().ssts.len()
     }
+
+    /// Total size in bytes of the live SSTables.
+    pub fn sst_bytes(&self) -> u64 {
+        self.inner.state_read().ssts.iter().map(|t| t.meta().file_size).sum()
+    }
+
+    /// Sizes of the live SSTables in bytes, newest first.
+    pub fn sst_sizes(&self) -> Vec<u64> {
+        self.inner.state_read().ssts.iter().map(|t| t.meta().file_size).collect()
+    }
+
+    /// Flush the memtable, then merge every SSTable into one (a *major*
+    /// compaction), dropping overwritten values and all tombstones. Waits for
+    /// any background compaction to finish first.
+    pub fn compact(&self) -> Result<()> {
+        self.flush()?;
+        let inner = &self.inner;
+        let _guard = inner.compaction_lock.lock().unwrap_or_else(|e| e.into_inner());
+        inner.check_bg_error()?;
+        let ssts = Arc::clone(&inner.state_read().ssts);
+        let worth_it = ssts.len() > 1 || ssts.first().is_some_and(|t| t.meta().num_tombstones > 0);
+        if worth_it {
+            inner.compact_tables(ssts.to_vec(), true)?;
+        }
+        Ok(())
+    }
+
+    /// Run size-tiered compactions on the calling thread until no tier is
+    /// ready (the same policy the background thread uses). Lets tests and
+    /// benchmarks wait for the tree to settle.
+    pub fn run_pending_compactions(&self) -> Result<()> {
+        self.inner.compact_while_needed()?;
+        self.inner.check_bg_error()
+    }
+
+    /// Bytes written by the user and by the engine, since open.
+    pub fn write_stats(&self) -> WriteStats {
+        let c = &self.inner.io;
+        let load = |a: &AtomicU64| a.load(Ordering::Relaxed);
+        WriteStats {
+            user_bytes: load(&c.user_bytes),
+            wal_bytes: load(&c.wal_bytes),
+            flush_bytes: load(&c.flush_bytes),
+            compaction_bytes_read: load(&c.compaction_bytes_read),
+            compaction_bytes_written: load(&c.compaction_bytes_written),
+            flushes: load(&c.flushes),
+            compactions: load(&c.compactions),
+            compaction_input_tables: load(&c.compaction_input_tables),
+        }
+    }
 }
 
 impl Drop for Db {
     fn drop(&mut self) {
+        self.inner.shutting_down.store(true, Ordering::Relaxed);
         // Messages are handled in order, so a queued flush finishes first.
         let _ = self.inner.flush_tx.send(FlushMsg::Shutdown);
         if let Some(h) = self.flusher.take() {
+            let _ = h.join();
+        }
+        // A compaction in progress runs to completion; no new one starts.
+        let _ = self.inner.compact_tx.send(CompactMsg::Shutdown);
+        if let Some(h) = self.compactor.take() {
             let _ = h.join();
         }
     }
@@ -586,6 +711,9 @@ impl Inner {
         };
         w.wal.append(rec)?;
         w.next_seq += 1;
+        let user = key.len() + value.map_or(0, <[u8]>::len);
+        self.io.user_bytes.fetch_add(user as u64, Ordering::Relaxed);
+        self.io.wal_bytes.fetch_add(wal::encoded_len(key.len(), value.map_or(0, <[u8]>::len)) as u64, Ordering::Relaxed);
         // Applied while still holding the writer lock, so the memtable sees
         // writes in sequence order and only after they are in the WAL.
         self.state_write().mem.insert(key.to_vec(), seq, value.map(<[u8]>::to_vec));
@@ -672,6 +800,7 @@ impl Inner {
             let edit = VersionEdit {
                 log_number: Some(imm.next_log_number),
                 next_file_number: Some(imm.sst_number + 1),
+                last_sequence: Some(imm.mem.max_seq()),
                 added: vec![(imm.sst_number, table.meta().file_size)],
                 deleted: Vec::new(),
             };
@@ -681,6 +810,8 @@ impl Inner {
 
         match result {
             Ok(table) => {
+                self.io.flush_bytes.fetch_add(table.meta().file_size, Ordering::Relaxed);
+                self.io.flushes.fetch_add(1, Ordering::Relaxed);
                 {
                     let mut s = self.state_write();
                     let mut ssts = Vec::with_capacity(s.ssts.len() + 1);
@@ -696,16 +827,134 @@ impl Inner {
                     let _ = fs::remove_file(self.dir.join(wal::wal_file_name(n)));
                 }
                 let _ = fsutil::sync_dir(&self.dir);
+                if self.options.auto_compaction {
+                    let _ = self.compact_tx.send(CompactMsg::Compact);
+                }
             }
-            Err(e) => {
-                *self.bg_error.lock().unwrap_or_else(|e| e.into_inner()) =
-                    Some(format!("flush to SSTable {} failed: {e}", imm.sst_number));
-            }
+            Err(e) => self.set_bg_error(format!("flush to SSTable {} failed: {e}", imm.sst_number)),
         }
         // Take the writer lock before notifying, so a writer that has just
         // seen `imm.is_some()` is already waiting and can't miss the wakeup.
         drop(self.lock_writer());
         self.flushed.notify_all();
+    }
+
+    fn set_bg_error(&self, msg: String) {
+        self.bg_error.lock().unwrap_or_else(|e| e.into_inner()).get_or_insert(msg);
+        drop(self.lock_writer());
+        self.flushed.notify_all();
+    }
+
+    fn compaction_loop(&self, rx: Receiver<CompactMsg>) {
+        while let Ok(CompactMsg::Compact) = rx.recv() {
+            // Collapse a burst of requests into one pass.
+            let mut shutdown = false;
+            loop {
+                match rx.try_recv() {
+                    Ok(CompactMsg::Compact) => {}
+                    Ok(CompactMsg::Shutdown) => {
+                        shutdown = true;
+                        break;
+                    }
+                    Err(_) => break,
+                }
+            }
+            if let Err(e) = self.compact_while_needed() {
+                self.set_bg_error(format!("compaction failed: {e}"));
+            }
+            if shutdown {
+                break;
+            }
+        }
+    }
+
+    /// Keep running size-tiered compactions until no tier is ready.
+    fn compact_while_needed(&self) -> Result<()> {
+        let o = &self.options;
+        loop {
+            if self.shutting_down.load(Ordering::Relaxed) || self.check_bg_error().is_err() {
+                return Ok(());
+            }
+            let _guard = self.compaction_lock.lock().unwrap_or_else(|e| e.into_inner());
+            let ssts = Arc::clone(&self.state_read().ssts);
+            let sizes: Vec<u64> = ssts.iter().map(|t| t.meta().file_size).collect();
+            let floor = o.memtable_size as u64;
+            let Some(run) = pick_size_tiered(&sizes, floor, o.compaction_min_merge, o.compaction_max_merge, o.compaction_size_ratio)
+            else {
+                return Ok(());
+            };
+            // Tombstones may be dropped only if no older table could still
+            // hold a value they shadow: the run must reach the oldest table.
+            let bottommost = run.end == ssts.len();
+            self.compact_tables(ssts[run].to_vec(), bottommost)?;
+        }
+    }
+
+    /// Merge `inputs` (adjacent in age, newest first) into one SSTable,
+    /// commit the swap to the manifest, install it, and schedule the inputs
+    /// for deletion. The caller holds `compaction_lock`.
+    fn compact_tables(&self, inputs: Vec<Arc<SstReader>>, drop_tombstones: bool) -> Result<()> {
+        let number = {
+            let mut w = self.lock_writer();
+            w.next_file_number += 1;
+            w.next_file_number - 1
+        };
+        let mut sources = Vec::with_capacity(inputs.len());
+        for t in &inputs {
+            let mut it = SstIter::new(Arc::clone(t));
+            it.seek_to_first()?;
+            sources.push(Source::Sst(it));
+        }
+        let mut merge = MergeIter::new(sources, Bound::Unbounded);
+        let meta = sstable::build_table_with(&self.dir, number, self.options.block_size, self.options.bloom_bits_per_key, |w| {
+            while let Some((key, entry)) = merge.next_entry()? {
+                if drop_tombstones && entry.value.is_none() {
+                    continue;
+                }
+                w.add(&key, entry.seq, entry.value.as_deref())?;
+            }
+            Ok(())
+        })?;
+        let path = self.dir.join(filename::sst_file_name(number));
+        let output = if meta.num_entries > 0 {
+            Some(Arc::new(SstReader::open(&path, number)?))
+        } else {
+            // Everything was deleted: nothing to install.
+            fs::remove_file(&path)?;
+            None
+        };
+
+        // The commit point. Before it, a crash leaves the output as an orphan
+        // and the inputs live. After it, the inputs are orphans.
+        let input_numbers: Vec<u64> = inputs.iter().map(|t| t.number()).collect();
+        let edit = VersionEdit {
+            added: output.iter().map(|t| (t.number(), t.meta().file_size)).collect(),
+            deleted: input_numbers.clone(),
+            ..VersionEdit::default()
+        };
+        self.manifest.lock().unwrap_or_else(|e| e.into_inner()).append(&edit)?;
+
+        {
+            // Flushes may have added newer tables meanwhile; keep them.
+            let mut s = self.state_write();
+            let mut ssts: Vec<Arc<SstReader>> =
+                s.ssts.iter().filter(|t| !input_numbers.contains(&t.number())).cloned().collect();
+            ssts.extend(output.iter().cloned());
+            ssts.sort_by_key(|t| std::cmp::Reverse((t.meta().max_seq, t.number())));
+            s.ssts = Arc::new(ssts);
+        }
+        // Readers and iterators holding an input keep it alive; the file goes
+        // when the last reference does.
+        for t in &inputs {
+            t.mark_obsolete();
+        }
+
+        let io = &self.io;
+        io.compactions.fetch_add(1, Ordering::Relaxed);
+        io.compaction_input_tables.fetch_add(inputs.len() as u64, Ordering::Relaxed);
+        io.compaction_bytes_read.fetch_add(inputs.iter().map(|t| t.meta().file_size).sum(), Ordering::Relaxed);
+        io.compaction_bytes_written.fetch_add(meta.file_size, Ordering::Relaxed);
+        Ok(())
     }
 
     fn check_bg_error(&self) -> Result<()> {
@@ -743,6 +992,12 @@ fn validate(o: &Options) -> Result<()> {
     }
     if !(1..=64).contains(&o.bloom_bits_per_key) {
         return bad("bloom_bits_per_key must be in 1..=64");
+    }
+    if o.compaction_min_merge < 2 || o.compaction_max_merge < o.compaction_min_merge {
+        return bad("need 2 <= compaction_min_merge <= compaction_max_merge");
+    }
+    if o.compaction_size_ratio.is_nan() || o.compaction_size_ratio < 1.0 {
+        return bad("compaction_size_ratio must be >= 1.0");
     }
     Ok(())
 }

@@ -12,8 +12,9 @@ use minirocks::{Db, Error, Options, SyncPolicy};
 
 type Model = BTreeMap<Vec<u8>, Vec<u8>>;
 
+/// Auto-compaction off: the filter tests need many overlapping tables.
 fn small(memtable_size: usize) -> Options {
-    Options { sync: SyncPolicy::Never, memtable_size, block_size: 512, ..Options::default() }
+    Options { sync: SyncPolicy::Never, memtable_size, block_size: 512, auto_compaction: false, ..Options::default() }
 }
 
 /// Fill a database whose SSTables each span the whole key space (keys are

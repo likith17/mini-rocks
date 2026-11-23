@@ -3,9 +3,9 @@
 //!
 //! Done so far: the write-ahead log, the memtable, crash recovery (phase 1),
 //! the SSTable format with background flushing (phase 2), the read path
-//! with Bloom filters and a streaming merge iterator (phase 3), and the
-//! manifest that records which SSTables are live (phase 4). Compaction comes
-//! next.
+//! with Bloom filters and a streaming merge iterator (phase 3), the
+//! manifest that records which SSTables are live (phase 4), and size-tiered
+//! background compaction (phase 5).
 //!
 //! # Durability contract
 //!
@@ -27,6 +27,7 @@
 mod block;
 mod bloom;
 mod coding;
+mod compaction;
 mod db;
 mod error;
 pub mod filename;
@@ -42,7 +43,7 @@ pub mod wal;
 #[cfg(test)]
 mod testutil;
 
-pub use db::{Db, ReadStats, RecoveryReport, MAX_KEY_LEN, MAX_VALUE_LEN};
+pub use db::{Db, ReadStats, RecoveryReport, WriteStats, MAX_KEY_LEN, MAX_VALUE_LEN};
 pub use iter::DbIter;
 pub use error::{Error, Result};
 pub use options::{Options, SyncPolicy, WalRecoveryMode};

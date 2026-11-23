@@ -36,7 +36,7 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{BufWriter, Write};
 use std::ops::Bound;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 
 use crate::block::{Block, BlockBuilder, BlockIter, DATA_RESTART_INTERVAL};
@@ -256,12 +256,27 @@ pub fn build_table<'a>(
     block_size: usize,
     bloom_bits_per_key: usize,
 ) -> Result<SstMeta> {
-    let tmp = dir.join(filename::temp_sst_file_name(number));
-    let result = (|| -> Result<SstMeta> {
-        let mut w = SstWriter::create(&tmp, block_size, bloom_bits_per_key)?;
+    build_table_with(dir, number, block_size, bloom_bits_per_key, |w| {
         for (key, e) in entries {
             w.add(key, e.seq, e.value.as_deref())?;
         }
+        Ok(())
+    })
+}
+
+/// Like [`build_table`], with `fill` adding the entries (for sources that
+/// can fail mid-stream, such as a compaction's merge).
+pub fn build_table_with(
+    dir: &Path,
+    number: u64,
+    block_size: usize,
+    bloom_bits_per_key: usize,
+    fill: impl FnOnce(&mut SstWriter) -> Result<()>,
+) -> Result<SstMeta> {
+    let tmp = dir.join(filename::temp_sst_file_name(number));
+    let result = (|| -> Result<SstMeta> {
+        let mut w = SstWriter::create(&tmp, block_size, bloom_bits_per_key)?;
+        fill(&mut w)?;
         w.finish()
     })();
     match result {
@@ -291,6 +306,20 @@ pub struct SstReader {
     meta: SstMeta,
     /// Data blocks read from disk by this reader (for statistics).
     blocks_read: AtomicU64,
+    /// Set once a compaction has removed this table from the manifest. The
+    /// file is deleted when the last reference (an in-flight read or
+    /// iterator) is dropped.
+    obsolete: AtomicBool,
+}
+
+impl Drop for SstReader {
+    fn drop(&mut self) {
+        if *self.obsolete.get_mut() {
+            // If this fails (or the process dies first), the file is an
+            // orphan and recovery deletes it.
+            let _ = fs::remove_file(&self.path);
+        }
+    }
 }
 
 impl SstReader {
@@ -346,7 +375,16 @@ impl SstReader {
             return Err(corrupt("index and meta block disagree about emptiness"));
         }
 
-        Ok(SstReader { file, path: path.to_path_buf(), number, index, bloom, meta, blocks_read: AtomicU64::new(0) })
+        Ok(SstReader {
+            file,
+            path: path.to_path_buf(),
+            number,
+            index,
+            bloom,
+            meta,
+            blocks_read: AtomicU64::new(0),
+            obsolete: AtomicBool::new(false),
+        })
     }
 
     pub fn number(&self) -> u64 {
@@ -393,6 +431,12 @@ impl SstReader {
 
     pub fn blocks_read(&self) -> u64 {
         self.blocks_read.load(Ordering::Relaxed)
+    }
+
+    /// Delete the file once the last reference to this reader is dropped.
+    /// Call only after the table's removal is committed to the manifest.
+    pub fn mark_obsolete(&self) {
+        self.obsolete.store(true, Ordering::Relaxed);
     }
 
     /// Point lookup. `Ok(None)`: no entry for `key` in this file.

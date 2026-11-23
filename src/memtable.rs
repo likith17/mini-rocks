@@ -33,6 +33,7 @@ const ENTRY_OVERHEAD: usize = 48;
 pub struct MemTable {
     map: BTreeMap<Vec<u8>, Entry>,
     approx_bytes: usize,
+    max_seq: u64,
 }
 
 impl MemTable {
@@ -45,6 +46,7 @@ impl MemTable {
     /// any order converges to the newest.
     pub fn insert(&mut self, key: Vec<u8>, seq: u64, value: Option<Vec<u8>>) {
         let new_len = value.as_ref().map_or(0, Vec::len);
+        self.max_seq = self.max_seq.max(seq);
         match self.map.entry(key) {
             btree_map::Entry::Occupied(mut o) => {
                 let e = o.get_mut();
@@ -90,6 +92,11 @@ impl MemTable {
 
     pub fn is_empty(&self) -> bool {
         self.map.is_empty()
+    }
+
+    /// Highest sequence number ever inserted (0 if none).
+    pub fn max_seq(&self) -> u64 {
+        self.max_seq
     }
 
     /// Approximate memory used by keys, values and per-entry overhead.
